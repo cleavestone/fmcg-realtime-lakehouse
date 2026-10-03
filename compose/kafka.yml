@@ -1,4 +1,4 @@
-# Single-node Kafka in KRaft mode + Kafka UI (profile: kafka). See ADR-001.
+# Single-node Kafka in KRaft mode + Kafka UI (profiles: kafka, cdc). See ADR-001.
 # No env_file here: the apache/kafka image turns every KAFKA_* variable into a broker
 # property, so only the explicit settings below reach the container.
 
@@ -11,7 +11,7 @@ x-logging: &logging
 services:
   kafka:
     image: ${KAFKA_IMAGE:?set KAFKA_IMAGE in .env}
-    profiles: [kafka]
+    profiles: [kafka, cdc]
     hostname: kafka
     environment:
       CLUSTER_ID: ${KAFKA_CLUSTER_ID:?set KAFKA_CLUSTER_ID in .env}
@@ -55,10 +55,13 @@ services:
 
   kafka-ui:
     image: ${KAFKA_UI_IMAGE:?set KAFKA_UI_IMAGE in .env}
-    profiles: [kafka]
+    profiles: [kafka, cdc]
     environment:
       KAFKA_CLUSTERS_0_NAME: fmcg
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      # Shows connectors in the UI once the cdc profile is up (harmless when it isn't).
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: fmcg-connect
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://kafka-connect:8083
       DYNAMIC_CONFIG_ENABLED: "false"
       JAVA_OPTS: ${KAFKA_UI_JAVA_OPTS:--Xmx256m}
     ports:

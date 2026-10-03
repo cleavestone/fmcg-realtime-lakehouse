@@ -26,7 +26,6 @@ flowchart LR
   subgraph Ingestion
     PG -- "logical replication<br/>(pgoutput)" --> DBZ[Debezium<br/>Kafka Connect]
     DBZ --> K[[Kafka KRaft<br/>fmcg.public.*]]
-    DBZ -. failed records .-> DLQ[[DLQ topic]]
   end
 
   subgraph Lakehouse["Lakehouse (Delta Lake on MinIO)"]
@@ -97,7 +96,7 @@ Bring the stack up one domain at a time with `make up P=<profile>`:
 |---|---|
 | 5432 | Postgres |
 | 8080 | Kafka UI |
-| 8083 | Kafka Connect REST |
+| 8083 | Kafka Connect REST (connector status) |
 | 9000 / 9001 | MinIO API / console |
 | 4040–4042 | Spark UIs (bronze, silver facts, silver dims) |
 | 8081 | Trino (also the Power BI data source) |

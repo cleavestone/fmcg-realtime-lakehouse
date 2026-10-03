@@ -36,9 +36,9 @@ sequenceDiagram
 | PostgreSQL 16 | OLTP source; `wal_level=logical`, publication over the FMCG tables, dedicated replication user | `source` |
 | seed (one-shot) | Deterministic master data + ~30 days of historical orders | `source` |
 | simulator | Long-running "company applications" producing weighted business events | `sim` |
-| Kafka (KRaft) | Durable event log, one topic per source table, plus a DLQ | `kafka` |
+| Kafka (KRaft) | Durable event log, one topic per source table (`fmcg.public.<table>`) | `kafka` |
 | Kafka UI | Topic and consumer inspection | `kafka` |
-| Kafka Connect + Debezium | CDC from Postgres into Kafka | `cdc` |
+| Kafka Connect + Debezium | CDC from Postgres into Kafka; fails fast on errors (no source-side DLQ, see ADR-002) | `cdc` |
 | MinIO | S3-compatible object storage for Delta tables and Spark checkpoints | `lake` |
 | Hive Metastore | Shared table catalog for Spark and Trino | `lake` |
 | spark-bronze | Kafka → Bronze Delta (append-only) | `streaming` |

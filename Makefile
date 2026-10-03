@@ -18,7 +18,8 @@ define not_yet
 endef
 
 .PHONY: help env up demo down nuke ps logs build seed simulate stop-sim scenario \
-        kafka-topics kafka-smoke register-connector psql dbt-build reconcile test lint
+        kafka-topics kafka-smoke register-connector connector-status cdc-counts cdc-tail \
+        psql dbt-build reconcile test lint
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -80,8 +81,19 @@ kafka-smoke: ## Broker smoke test: create, produce, consume and delete a test to
 
 # --- CDC ----------------------------------------------------------------------
 
-register-connector: ## Create/update the Debezium connector (idempotent)
-	$(call not_yet,3)
+register-connector: env ## Create/update the Debezium connector (idempotent) and wait for RUNNING
+	$(COMPOSE) --profile cdc run --rm connector-register
+
+connector-status: ## Show the Debezium connector and task state
+	@curl -fsS http://localhost:8083/connectors/fmcg-postgres/status; echo
+
+cdc-counts: ## Kafka messages per CDC topic vs Postgres row counts
+	@bash infra/debezium/cdc-counts.sh
+
+T ?= orders
+N ?= 5
+cdc-tail: ## Last N CDC messages for a table: make cdc-tail T=orders N=5
+	@$(COMPOSE) --profile cdc exec -T kafka bash -s -- $(T) $(N) < infra/debezium/cdc-tail.sh
 
 # --- Lakehouse and gold -------------------------------------------------------
 

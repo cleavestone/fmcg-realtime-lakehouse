@@ -86,3 +86,14 @@ CREATE INDEX orders_rep_id_idx ON orders (rep_id);
 CREATE INDEX orders_status_idx ON orders (status);
 CREATE INDEX orders_order_ts_idx ON orders (order_ts);
 CREATE INDEX order_items_product_id_idx ON order_items (product_id);
+
+-- CDC: log the full old row on UPDATE/DELETE. With the default identity (primary key only)
+-- a Debezium delete event carries placeholder values (0, 1970-01-01, column defaults) for
+-- every non-key NOT NULL column; FULL makes delete events carry the real last state.
+ALTER TABLE regions REPLICA IDENTITY FULL;
+ALTER TABLE stores REPLICA IDENTITY FULL;
+ALTER TABLE products REPLICA IDENTITY FULL;
+ALTER TABLE sales_reps REPLICA IDENTITY FULL;
+ALTER TABLE orders REPLICA IDENTITY FULL;
+ALTER TABLE order_items REPLICA IDENTITY FULL;
+ALTER TABLE inventory REPLICA IDENTITY FULL;

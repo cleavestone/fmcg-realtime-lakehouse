@@ -7,8 +7,8 @@ Phase-by-phase build log. Updated at the end of every phase.
 | 0. Scaffold and architecture docs | Done |
 | 1a. Source database and seed data | Done |
 | 1b. Business event simulator | Done |
-| 2. Kafka | Implemented, awaiting verification |
-| 3. Debezium CDC | — |
+| 2. Kafka | Done |
+| 3. Debezium CDC | Implemented, awaiting verification |
 | 4. Lake foundation | — |
 | 5. Bronze ingestion | — |
 | 6. Silver facts | — |
@@ -16,6 +16,70 @@ Phase-by-phase build log. Updated at the end of every phase.
 | 8. Trino and dbt Gold | — |
 | 9. Power BI report | — |
 | 10. Hardening and polish | — |
+
+---
+
+## Phase 3: Debezium CDC
+
+**Built**
+- `compose/cdc.yml` (profile `cdc`):
+  - **`kafka-connect`:** `quay.io/debezium/connect:2.7.4.Final` (Kafka 3.7 clients), REST API on :8083.
+    - **Setup:** JSON converters with schemas off; internal topics `connect-configs`, `connect-offsets` and `connect-status` with replication factor 1; `EnvVarConfigProvider` for secrets.
+    - **Startup and health:** waits for `kafka` and `postgres` to be healthy; healthcheck on `GET /connectors`; 1 GB limit; log rotation.
+  - **`connector-register`:** a one-shot job (`curlimages/curl:8.22.0`) that runs `infra/debezium/register.sh`. It does an idempotent `PUT /connectors/fmcg-postgres/config`, then waits until the connector *and* its task are `RUNNING` (exit 0) or `FAILED`/timeout (exit 1). It waits for `kafka-connect` to be healthy and `seed` to complete, so the snapshot always includes the seed.
+- `infra/debezium/fmcg-postgres.json`:
+  - **Source:** `pgoutput`, slot `fmcg_debezium`, the pre-created `fmcg_publication` (`publication.autocreate.mode=disabled`), and the 7 tables.
+  - **Topics:** `topic.prefix=fmcg`, giving `fmcg.public.<table>`.
+  - **Snapshot and heartbeat:** `snapshot.mode=initial`, with a heartbeat every 10 s (`__debezium-heartbeat.fmcg`).
+  - **Message shape:** decimals as strings; unwrap SMT with `add.fields=op,source.ts_ms,source.lsn` and `delete.tombstone.handling.mode=rewrite`.
+  - **Topic creation:** `topic.creation.default.*` gives 1 partition, replication factor 1, 7-day retention and lz4.
+  - **Errors:** `errors.tolerance=none`, with full error logging.
+- Postgres:
+  - **`REPLICA IDENTITY FULL`** on all 7 tables (`01_schema.sql`).
+  - **`max_slot_wal_keep_size=2GB`.**
+  - **Profiles:** `postgres` and `seed` join the `cdc` profile, and so do `kafka` and `kafka-ui` (which now also shows the Connect cluster).
+- `Makefile`: `register-connector`, `connector-status`, `cdc-counts` (`infra/debezium/cdc-counts.sh`) and `cdc-tail T=<table> N=<n>` (`infra/debezium/cdc-tail.sh`).
+- Docs: ADR-002 revised (fail-fast instead of DLQ, replica identity, secrets provider); README diagram and `architecture.md` no longer show a Connect DLQ; `runbook.md` has a CDC section.
+
+**How to run**
+```bash
+make up P=cdc               # postgres, seed, kafka, kafka-ui, kafka-connect, connector-register
+make connector-status       # connector + task RUNNING
+make cdc-counts             # after the snapshot: kafka_msgs == pg_rows for every table
+make cdc-tail T=orders N=5  # latest events with __op / __source_lsn
+make simulate               # live changes flow within ~1 s
+```
+
+**Example event** (`fmcg.public.products`, key `{"product_id":1}`):
+```json
+{"product_id":1,"sku":"BEV-TAM-001-EA","name":"Tamu Cola 330ml","unit_price":"52.50","is_active":true,
+ "updated_at":"2026-10-03T14:01:36.662488Z","__deleted":"false","__op":"u",
+ "__source_ts_ms":1791036096666,"__source_lsn":31677120}
+```
+
+**Decisions**
+- **No Connect DLQ:** Kafka Connect DLQs exist only for sink connectors, and `errors.tolerance=all` on a source silently drops changes. CDC fails fast instead; the slot retains WAL, so a fix plus restart loses nothing. The dead-letter layer moves to the Bronze quarantine table in Phase 5 (ADR-002).
+- **`REPLICA IDENTITY FULL`:** testing showed that with the default identity, delete events carried placeholders (`store_id: 0`, `order_ts: 1970-01-01`, `status: placed`). With FULL they carry the real last row.
+- **WAL safety cap:** `max_slot_wal_keep_size=2GB`. A long Connect outage invalidates the slot instead of filling the Postgres disk, and recovery is a re-snapshot (see the runbook).
+- **No `env_file` on Connect:** the worker receives only `POSTGRES_DB` and the Debezium user's credentials, not the Postgres superuser password.
+- **Version:** Debezium 2.7.4.Final (latest 2.7), aligned with the Kafka 3.x broker. Debezium 3.x is a future upgrade.
+
+**Verified**
+- **Clean start:** `make nuke && make up P=cdc` brings every service up healthy, and `connector-register` exits 0 with the connector and task RUNNING.
+- **Snapshot:** 7 `fmcg.public.*` topics plus the heartbeat topic. `cdc-counts` matches Postgres exactly: 5 / 50 / 200 / 10 / 2,426 / 10,576 / 600.
+- **Streaming:**
+  - `scd2_price_test` produced three `__op:"u"` events for product 1 with increasing LSNs.
+  - `delete_test` produced `__op:"d"`, `__deleted:"true"` events carrying the real last state, with the item deletes' LSNs before the order's.
+- **Latency:** from Postgres commit to the Kafka append, 450–830 ms with the simulator running.
+- **Resilience:**
+  - Re-running `make register-connector` is idempotent.
+  - After stopping Connect for 20 s while the simulator kept writing, rebuilding the latest state per `order_id` (highest LSN) from the topic matched Postgres exactly: 2,543 live orders, 0 missing, 0 extra, 0 status mismatches.
+- **Slot:** `fmcg_debezium` is active, `wal_status=reserved`, and `max_slot_wal_keep_size=2GB`.
+
+**Known issues**
+- Snapshot events (`__op:"r"`) share one LSN. That's fine for Silver, because each key appears once per snapshot.
+- A targeted re-snapshot that keeps downstream data isn't documented yet; the runbook uses a full reset until Phase 10.
+- An existing `.env` needs the new CDC block from `.env.example`, and the schema change (`REPLICA IDENTITY FULL`) needs `make nuke`, because init scripts only run on an empty volume.
 
 ---
 

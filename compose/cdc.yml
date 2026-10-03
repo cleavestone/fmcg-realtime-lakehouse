@@ -1,3 +1,77 @@
-# kafka-connect, connector-register (profile: cdc)
-# Implemented in Phase 3.
-services: {}
+# Kafka Connect with the Debezium Postgres connector + one-shot registration (profile: cdc).
+# See ADR-002. postgres, seed, kafka and kafka-ui also carry the cdc profile.
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: ${LOG_MAX_SIZE:-10m}
+    max-file: ${LOG_MAX_FILE:-3}
+
+services:
+  kafka-connect:
+    image: ${DEBEZIUM_CONNECT_IMAGE:?set DEBEZIUM_CONNECT_IMAGE in .env}
+    profiles: [cdc]
+    hostname: kafka-connect
+    # Explicit environment instead of env_file: the worker only gets the credentials the
+    # connector needs (the Debezium user), not the Postgres superuser password.
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: fmcg-connect
+      CONFIG_STORAGE_TOPIC: connect-configs
+      OFFSET_STORAGE_TOPIC: connect-offsets
+      STATUS_STORAGE_TOPIC: connect-status
+      CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      STATUS_STORAGE_REPLICATION_FACTOR: 1
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_REST_ADVERTISED_HOST_NAME: kafka-connect
+      # Connector configs reference ${env:...}; secrets never land in the connect-configs topic.
+      CONNECT_CONFIG_PROVIDERS: env
+      CONNECT_CONFIG_PROVIDERS_ENV_CLASS: org.apache.kafka.common.config.provider.EnvVarConfigProvider
+      HEAP_OPTS: ${KAFKA_CONNECT_HEAP_OPTS:--Xms256m -Xmx768m}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+      DEBEZIUM_DB_USER: ${DEBEZIUM_DB_USER:?set DEBEZIUM_DB_USER in .env}
+      DEBEZIUM_DB_PASSWORD: ${DEBEZIUM_DB_PASSWORD:?set DEBEZIUM_DB_PASSWORD in .env}
+    ports:
+      - "8083:8083"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks: [fmcg-net]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8083/connectors > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 30s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: ${KAFKA_CONNECT_MEM_LIMIT:-1g}
+    logging: *logging
+
+  connector-register:
+    image: ${CURL_IMAGE:?set CURL_IMAGE in .env}
+    profiles: [cdc]
+    entrypoint: ["/bin/sh", "/config/register.sh"]
+    volumes:
+      - ../infra/debezium:/config:ro
+    depends_on:
+      kafka-connect:
+        condition: service_healthy
+      # The snapshot must see the seed data, so register only after seeding finished.
+      seed:
+        condition: service_completed_successfully
+    networks: [fmcg-net]
+    restart: "no"
+    deploy:
+      resources:
+        limits:
+          memory: 64m
+    logging: *logging

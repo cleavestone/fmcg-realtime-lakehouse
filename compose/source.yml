@@ -1,5 +1,5 @@
 # postgres + one-shot seed (profile: source) and the live simulator (profile: sim).
-# postgres and seed also carry the sim profile, so `make up P=sim` brings up everything it needs.
+# postgres and seed also carry the sim and cdc profiles, so those bring up everything they need.
 
 x-logging: &logging
   driver: json-file
@@ -10,7 +10,7 @@ x-logging: &logging
 services:
   postgres:
     image: ${POSTGRES_IMAGE:?set POSTGRES_IMAGE in .env}
-    profiles: [source, sim]
+    profiles: [source, sim, cdc]
     # Logical decoding for Debezium (pgoutput). Slots/senders leave headroom for re-snapshots.
     command:
       - postgres
@@ -20,6 +20,10 @@ services:
       - max_replication_slots=4
       - -c
       - max_wal_senders=4
+      # Cap WAL retained for a stalled replication slot: a connector that stays down can't
+      # fill the disk. Past 2GB the slot is invalidated and Debezium must re-snapshot.
+      - -c
+      - max_slot_wal_keep_size=2GB
     env_file: ../.env
     environment:
       PGDATA: /var/lib/postgresql/data/pgdata
@@ -52,7 +56,7 @@ services:
       args:
         PYTHON_IMAGE: ${PYTHON_IMAGE:?set PYTHON_IMAGE in .env}
         UV_IMAGE: ${UV_IMAGE:?set UV_IMAGE in .env}
-    profiles: [source, sim]
+    profiles: [source, sim, cdc]
     command: ["seed"]
     env_file: ../.env
     depends_on:
