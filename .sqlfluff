@@ -3,7 +3,8 @@
 [sqlfluff]
 dialect = postgres
 max_line_length = 100
-exclude_rules = LT05
+# RF04: column names such as name/status are fixed by the domain model.
+exclude_rules = LT05, RF04
 
 [sqlfluff:rules:capitalisation.keywords]
 capitalisation_policy = upper

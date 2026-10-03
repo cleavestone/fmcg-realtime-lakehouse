@@ -1,0 +1,51 @@
+# Simulator configuration. Phase 1a: seed only (event weights arrive with the simulator).
+
+seed:
+  random_seed: 42
+  history_days: 30          # backfill window for historical orders, ending now
+  orders_per_day: 80        # baseline before weekday factors and jitter
+  stores: 50
+  sales_reps: 10            # assigned round-robin across regions
+  country: Kenya
+  timezone_offset_hours: 3  # EAT (UTC+3, no DST); business hours are local time
+  business_hours: [7, 19]   # orders are placed between 07:00 and 19:00 local
+
+  # Region weight drives both store placement and order volume.
+  regions:
+    - {name: Nairobi, weight: 0.35, warehouse: nairobi_dc}
+    - {name: Central, weight: 0.20, warehouse: nairobi_dc}
+    - {name: Coast, weight: 0.18, warehouse: mombasa_dc}
+    - {name: Rift Valley, weight: 0.15, warehouse: kisumu_dc}
+    - {name: Western, weight: 0.12, warehouse: kisumu_dc}
+
+  warehouses: [nairobi_dc, mombasa_dc, kisumu_dc]
+
+  # Monday=0 .. Sunday=6
+  weekday_factors: [1.0, 1.0, 1.0, 1.05, 1.15, 0.9, 0.6]
+
+  # Share of stores per channel, how often each channel orders, and order shape.
+  channels:
+    supermarket: {share: 0.30, order_frequency: 1.5, lines: [4, 8], qty: [5, 40], credit_limit: [200000, 1000000]}
+    kiosk: {share: 0.50, order_frequency: 1.0, lines: [1, 3], qty: [1, 6], credit_limit: [20000, 50000]}
+    wholesale: {share: 0.20, order_frequency: 2.0, lines: [3, 8], qty: [10, 80], credit_limit: [500000, 2000000]}
+
+  tiers: {bronze: 0.6, silver: 0.3, gold: 0.1}
+  tier_discounts: {bronze: [0], silver: [0, 2.5], gold: [0, 2.5, 5]}
+
+  # Zipf-like product popularity: weight = 1 / rank^alpha (alpha=1 -> top 20% of SKUs ~ 70% of lines).
+  popularity_alpha: 1.0
+
+  # Case SKUs are ordered in far smaller quantities than single units.
+  case_qty_divisor: 6
+
+  # Historical status by order age; anything older than the last bucket uses the last bucket.
+  status_by_age:
+    - {max_age_hours: 6, weights: {placed: 0.60, confirmed: 0.35, cancelled: 0.05}}
+    - {max_age_hours: 24, weights: {confirmed: 0.30, shipped: 0.62, cancelled: 0.08}}
+    - {max_age_hours: 72, weights: {shipped: 0.30, delivered: 0.63, cancelled: 0.07}}
+    - {max_age_hours: 1000000, weights: {delivered: 0.93, cancelled: 0.07}}
+
+  inventory:
+    qty: [50, 1500]
+    low_stock_share: 0.10   # SKUs/warehouse pairs that start low, so restocks have targets
+    low_stock_qty: [0, 20]

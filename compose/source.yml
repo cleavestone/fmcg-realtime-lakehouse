@@ -1,3 +1,66 @@
-# postgres, seed, simulator (profiles: source, sim)
-# Implemented in Phase 1a/1b.
-services: {}
+# postgres + one-shot seed (profile: source). The simulator service (profile: sim) arrives in Phase 1b.
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: ${LOG_MAX_SIZE:-10m}
+    max-file: ${LOG_MAX_FILE:-3}
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:?set POSTGRES_IMAGE in .env}
+    profiles: [source, sim]
+    # Logical decoding for Debezium (pgoutput). Slots/senders leave headroom for re-snapshots.
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_replication_slots=4
+      - -c
+      - max_wal_senders=4
+    env_file: ../.env
+    environment:
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ../infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5432:5432"
+    networks: [fmcg-net]
+    # TCP check: the image's temporary init-time server listens on the socket only,
+    # so this stays unhealthy until init scripts have finished.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: ${POSTGRES_MEM_LIMIT:-1g}
+    logging: *logging
+
+  seed:
+    image: fmcg/simulator:local
+    build:
+      context: ..
+      dockerfile: simulator/Dockerfile
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE:?set PYTHON_IMAGE in .env}
+        UV_IMAGE: ${UV_IMAGE:?set UV_IMAGE in .env}
+    profiles: [source]
+    command: ["seed"]
+    env_file: ../.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [fmcg-net]
+    restart: "no"
+    deploy:
+      resources:
+        limits:
+          memory: ${SIMULATOR_MEM_LIMIT:-256m}
+    logging: *logging

@@ -53,11 +53,11 @@ build: env ## Build all custom images
 
 # --- Source and simulator ---------------------------------------------------
 
-seed: ## Re-run the deterministic seed (idempotent)
-	$(call not_yet,1a)
+seed: env ## Run the deterministic seed (skips if already populated)
+	$(COMPOSE) --profile source run --rm seed
 
 psql: ## Open psql on the source database
-	$(call not_yet,1a)
+	$(COMPOSE) --profile source exec postgres sh -c 'psql -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"'
 
 simulate: ## Start the simulator and follow its logs
 	$(call not_yet,1b)
