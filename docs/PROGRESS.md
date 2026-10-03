@@ -8,14 +8,68 @@ Phase-by-phase build log. Updated at the end of every phase.
 | 1a. Source database and seed data | Done |
 | 1b. Business event simulator | Done |
 | 2. Kafka | Done |
-| 3. Debezium CDC | Implemented, awaiting verification |
-| 4. Lake foundation | — |
+| 3. Debezium CDC | Done |
+| 4. Lake foundation | Implemented, awaiting verification |
 | 5. Bronze ingestion | — |
 | 6. Silver facts | — |
 | 7. Silver dimensions (SCD2) | — |
 | 8. Trino and dbt Gold | — |
 | 9. Power BI report | — |
 | 10. Hardening and polish | — |
+
+---
+
+## Phase 4: Lake foundation (MinIO, Hive Metastore, Spark image)
+
+**Built**
+- `compose/lake.yml` (profiles `lake` and `streaming`):
+  - **`minio`:** `bitnamilegacy/minio:2025.7.23-debian-12-r5`. API on :9000, console on :9001 (`MINIO_BROWSER=on`, because Bitnami defaults the console to off), `minio-data` volume, healthcheck on `/minio/health/live`.
+  - **`minio-init`:** a one-shot job (`bitnamilegacy/minio-client`) running `infra/minio/init.sh`. It creates the `lakehouse` and `checkpoints` buckets and a **least-privilege service user** (`LAKE_ACCESS_KEY`, policy `lakehouse-rw` covering just those two buckets). It's idempotent and retries until MinIO accepts connections.
+  - **`hms-db`:** Postgres 16.15 for the metastore (`hms-db-data`).
+  - **`hive-metastore`:** a thin custom image over `apache/hive:3.1.3` (`infra/hive-metastore/`), thrift on :9083 (internal only), healthcheck by TCP probe. It waits for `hms-db` to be healthy and `minio-init` to complete.
+- `streaming/Dockerfile`: Python 3.11-slim-bookworm, OpenJDK 17, uv-installed `pyspark==3.5.9` and `delta-spark==3.3.3`.
+  - **JARs:** the JARs listed in `streaming/jars.txt` (Delta 3.3.3, hadoop-aws 3.3.4 + aws-java-sdk-bundle 1.12.262, and the Spark Kafka connector 3.5.9 with its dependencies) are downloaded from Maven Central at build time and **SHA-1 verified**. Nothing is fetched at runtime.
+  - **Runtime:** runs as non-root `spark` (uid 10001). Image size is 1.8 GB.
+- `streaming/conf/spark-defaults.conf`: Delta extensions and catalog, the Hive catalog at `thrift://hive-metastore:9083`, S3A to MinIO (path style, no SSL, credentials from env), UTC session time zone.
+- `streaming/src/streaming/common/spark.py`: the single `build_session()` used by every job (local mode; driver memory from `SPARK_DRIVER_MEMORY`).
+- `streaming/src/streaming/smoke_test.py`: creates database `smoke` at `s3a://lakehouse/smoke`, writes `smoke.numbers` (10 rows) with `saveAsTable`, reads it back by name, and checks the row count, the sum, the format and the metastore listing.
+- `compose/streaming.yml`: `spark-bronze` (the shared image, one-shot for now). Its ingestion command arrives in Phase 5.
+- `Makefile`: `make spark-smoke`.
+
+**How to run**
+```bash
+make up P=lake     # minio, minio-init, hms-db, hive-metastore
+make spark-smoke   # ends with "SMOKE TEST PASSED"
+# MinIO console: http://localhost:9001  (MINIO_ROOT_USER / MINIO_ROOT_PASSWORD from .env)
+```
+
+**Decisions**
+- **MinIO:** the community images are gone from Docker Hub ("object not found"). The build uses Bitnami's last legacy MinIO build (frozen July 2025, no further security updates; acceptable for a local stack). The alternatives considered were building MinIO from source and RustFS.
+- **Delta 3.3.3** instead of 3.2.x: it's the newest Delta release that supports Spark 3.5, with the same API.
+- **Hive Metastore 3.1.3**, with image fixes (ADR-005):
+  - The bundled 2016 Postgres JDBC driver can't authenticate against Postgres 16, so it's replaced with 42.7.13 (SHA-256 pinned).
+  - The S3A JARs are linked onto Hive's classpath.
+  - An entrypoint wrapper makes schema init idempotent; the stock image re-runs `initSchema` on every start and would crash-loop.
+  - The hardcoded `-Xmx1G` is overridden to 512 MB.
+- **No secrets in config files:**
+  - HMS gets its JDBC settings through `SERVICE_OPTS` system properties.
+  - Spark and HMS get S3 credentials through `AWS_*` env vars (`EnvironmentVariableCredentialsProvider`).
+  - Only `minio-init` sees the MinIO root credentials.
+- **Lake services also carry the `streaming` profile,** so `spark-bronze` can declare `depends_on` on them (the same pattern as `postgres` with `sim` and `cdc`).
+
+**Verified**
+- **Lake services:** all healthy, and `minio-init` exits 0, reporting both buckets and the `lakehouse-rw` policy on the service user.
+- **Metastore:** the first start initialises the schema. On restart it logs "schema present, skipping init" and becomes healthy with 0 restarts.
+- **Smoke test:** `make spark-smoke` reports `format=delta location=s3a://lakehouse/smoke/numbers rows=10 sum(square)=385` and `SMOKE TEST PASSED`. A second run passes with `delta_versions=2`.
+- **MinIO contents:** `_delta_log/00…0.json` and `00…1.json`, plus the Parquet files from both versions (old files stay until `VACUUM`, which is what makes time travel possible).
+- **Least privilege:** the service user gets `Access Denied` when it tries to create a bucket.
+- **Idle memory:** minio about 350 MB (limit raised to 768 MB), HMS about 345 MB of 768 MB, hms-db about 75 MB of 256 MB.
+
+**Known issues and notes**
+- Harmless Spark warnings: the native-hadoop library is missing (it uses built-in Java classes), the S3A metrics config is missing, and "Couldn't find corresponding Hive SerDe for data source provider delta". The last one is expected: Hive itself can't read Delta, but Spark and Trino read the table through its Delta metadata.
+- The MinIO console in community builds from mid-2025 is an object browser only (MinIO removed the admin screens upstream). Users and policies are managed by `minio-init` with `mc`.
+- Building the Spark image downloads about 650 MB (pyspark plus JARs); later builds are cached.
+- `.env` values containing spaces (`*_HEAP_OPTS`) are now quoted so `.env` can also be sourced by a shell. An existing `.env` needs the new lake block from `.env.example` added to it.
 
 ---
 

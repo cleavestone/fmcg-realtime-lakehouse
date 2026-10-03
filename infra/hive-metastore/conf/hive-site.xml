@@ -1,0 +1,44 @@
+<?xml version="1.0"?>
+<!-- Standalone Hive Metastore. JDBC connection and its password come from SERVICE_OPTS
+     (-Djavax.jdo.option.*) and S3 credentials from AWS_* env vars, so no secrets live here. -->
+<configuration>
+  <property>
+    <name>hive.metastore.warehouse.dir</name>
+    <value>s3a://lakehouse/warehouse</value>
+  </property>
+  <property>
+    <name>hive.metastore.schema.verification</name>
+    <value>true</value>
+  </property>
+  <property>
+    <name>datanucleus.autoCreateSchema</name>
+    <value>false</value>
+  </property>
+  <!-- Spark and Trino clients don't use the notification API. -->
+  <property>
+    <name>hive.metastore.event.db.notification.api.auth</name>
+    <value>false</value>
+  </property>
+
+  <!-- S3A -> MinIO (the metastore creates database/table directories) -->
+  <property>
+    <name>fs.s3a.impl</name>
+    <value>org.apache.hadoop.fs.s3a.S3AFileSystem</value>
+  </property>
+  <property>
+    <name>fs.s3a.endpoint</name>
+    <value>http://minio:9000</value>
+  </property>
+  <property>
+    <name>fs.s3a.path.style.access</name>
+    <value>true</value>
+  </property>
+  <property>
+    <name>fs.s3a.connection.ssl.enabled</name>
+    <value>false</value>
+  </property>
+  <property>
+    <name>fs.s3a.aws.credentials.provider</name>
+    <value>com.amazonaws.auth.EnvironmentVariableCredentialsProvider</value>
+  </property>
+</configuration>

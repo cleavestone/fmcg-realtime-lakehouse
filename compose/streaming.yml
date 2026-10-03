@@ -1,3 +1,36 @@
-# spark-bronze, spark-silver-facts, spark-silver-dims (profile: streaming)
-# Implemented in Phase 5-7.
-services: {}
+# Spark streaming jobs (profile: streaming), one job per container, Spark in local mode.
+# Phase 4 defines the shared image and spark-bronze, used for the lake smoke test;
+# the Bronze/Silver jobs and their Spark UIs arrive in Phases 5-7.
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: ${LOG_MAX_SIZE:-10m}
+    max-file: ${LOG_MAX_FILE:-3}
+
+services:
+  spark-bronze:
+    image: fmcg/spark:local
+    build:
+      context: ..
+      dockerfile: streaming/Dockerfile
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE:?set PYTHON_IMAGE in .env}
+        UV_IMAGE: ${UV_IMAGE:?set UV_IMAGE in .env}
+    profiles: [streaming]
+    environment:
+      AWS_ACCESS_KEY_ID: ${LAKE_ACCESS_KEY:?set LAKE_ACCESS_KEY in .env}
+      AWS_SECRET_ACCESS_KEY: ${LAKE_SECRET_KEY:?set LAKE_SECRET_KEY in .env}
+      SPARK_DRIVER_MEMORY: ${SPARK_DRIVER_MEMORY:-1g}
+    depends_on:
+      hive-metastore:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    networks: [fmcg-net]
+    restart: "no"
+    deploy:
+      resources:
+        limits:
+          memory: ${SPARK_MEM_LIMIT:-2g}
+    logging: *logging

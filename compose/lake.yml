@@ -1,3 +1,129 @@
-# minio, minio-init, hms-db, hive-metastore (profile: lake)
-# Implemented in Phase 4.
-services: {}
+# Object storage, catalog (profiles: lake, streaming). See ADR-005.
+#   minio          S3-compatible storage (Bitnami legacy build: MinIO no longer publishes images)
+#   minio-init     one-shot: buckets + least-privilege service user
+#   hms-db         Postgres backing the Hive Metastore
+#   hive-metastore shared table catalog for Spark and Trino (thrift :9083)
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: ${LOG_MAX_SIZE:-10m}
+    max-file: ${LOG_MAX_FILE:-3}
+
+services:
+  minio:
+    image: ${MINIO_IMAGE:?set MINIO_IMAGE in .env}
+    profiles: [lake, streaming]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+      MINIO_CONSOLE_PORT_NUMBER: 9001
+      MINIO_BROWSER: "on"   # Bitnami defaults the web console to off
+    volumes:
+      - minio-data:/bitnami/minio/data
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # web console
+    networks: [fmcg-net]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live > /dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: ${MINIO_MEM_LIMIT:-768m}
+    logging: *logging
+
+  minio-init:
+    image: ${MINIO_CLIENT_IMAGE:?set MINIO_CLIENT_IMAGE in .env}
+    profiles: [lake, streaming]
+    entrypoint: ["/bin/sh", "/init/init.sh"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      LAKE_ACCESS_KEY: ${LAKE_ACCESS_KEY:?set LAKE_ACCESS_KEY in .env}
+      LAKE_SECRET_KEY: ${LAKE_SECRET_KEY:?set LAKE_SECRET_KEY in .env}
+    volumes:
+      - ../infra/minio:/init:ro
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks: [fmcg-net]
+    restart: "no"
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+    logging: *logging
+
+  hms-db:
+    image: ${POSTGRES_IMAGE:?set POSTGRES_IMAGE in .env}
+    profiles: [lake, streaming]
+    environment:
+      POSTGRES_DB: ${HMS_DB_NAME:-metastore}
+      POSTGRES_USER: ${HMS_DB_USER:-hive}
+      POSTGRES_PASSWORD: ${HMS_DB_PASSWORD:?set HMS_DB_PASSWORD in .env}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - hms-db-data:/var/lib/postgresql/data
+    networks: [fmcg-net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: ${HMS_DB_MEM_LIMIT:-256m}
+    logging: *logging
+
+  hive-metastore:
+    image: fmcg/hive-metastore:local
+    build:
+      context: ..
+      dockerfile: infra/hive-metastore/Dockerfile
+      args:
+        HIVE_IMAGE: ${HIVE_IMAGE:?set HIVE_IMAGE in .env}
+    profiles: [lake, streaming]
+    hostname: hive-metastore
+    environment:
+      SERVICE_NAME: metastore
+      DB_DRIVER: postgres
+      HIVE_CUSTOM_CONF_DIR: /hive_custom_conf
+      # JDBC settings as system properties (keeps the password out of hive-site.xml).
+      # -Xmx last: overrides the stock entrypoint's hardcoded -Xmx1G.
+      SERVICE_OPTS: >-
+        -Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver
+        -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://hms-db:5432/${HMS_DB_NAME:-metastore}
+        -Djavax.jdo.option.ConnectionUserName=${HMS_DB_USER:-hive}
+        -Djavax.jdo.option.ConnectionPassword=${HMS_DB_PASSWORD}
+        -Xmx512m
+      AWS_ACCESS_KEY_ID: ${LAKE_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${LAKE_SECRET_KEY}
+    volumes:
+      - ../infra/hive-metastore/conf:/hive_custom_conf:ro
+    depends_on:
+      hms-db:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    networks: [fmcg-net]
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/9083'"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 40s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: ${HMS_MEM_LIMIT:-768m}
+    logging: *logging

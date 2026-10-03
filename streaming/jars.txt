@@ -1,0 +1,17 @@
+# JVM dependencies baked into the Spark image (groupId:artifactId:version), downloaded
+# from Maven Central at build time with SHA-1 verification. Versions must match:
+#   Spark 3.5.9 / Scala 2.12, Hadoop 3.3.4 (bundled with pyspark), Delta 3.3.3.
+
+# Delta Lake
+io.delta:delta-spark_2.12:3.3.3
+io.delta:delta-storage:3.3.3
+
+# S3A filesystem for MinIO
+org.apache.hadoop:hadoop-aws:3.3.4
+com.amazonaws:aws-java-sdk-bundle:1.12.262
+
+# Kafka source for Structured Streaming (+ its runtime dependencies)
+org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.9
+org.apache.spark:spark-token-provider-kafka-0-10_2.12:3.5.9
+org.apache.kafka:kafka-clients:3.4.1
+org.apache.commons:commons-pool2:2.11.1

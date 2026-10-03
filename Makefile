@@ -18,7 +18,7 @@ define not_yet
 endef
 
 .PHONY: help env up demo down nuke ps logs build seed simulate stop-sim scenario \
-        kafka-topics kafka-smoke register-connector connector-status cdc-counts cdc-tail \
+        kafka-topics kafka-smoke register-connector connector-status cdc-counts cdc-tail spark-smoke \
         psql dbt-build reconcile test lint
 
 help: ## Show this help
@@ -78,6 +78,11 @@ kafka-topics: ## List Kafka topics
 
 kafka-smoke: ## Broker smoke test: create, produce, consume and delete a test topic
 	$(COMPOSE) --profile kafka exec -T kafka bash < infra/kafka/smoke-test.sh
+
+# --- Lake -----------------------------------------------------------------------
+
+spark-smoke: env ## Lake smoke test: write a Delta table to MinIO, register it in HMS, read it back
+	$(COMPOSE) --profile lake --profile streaming run --rm spark-bronze python -m streaming.smoke_test
 
 # --- CDC ----------------------------------------------------------------------
 
