@@ -6,8 +6,8 @@ Phase-by-phase build log. Updated at the end of every phase.
 |---|---|
 | 0. Scaffold and architecture docs | Done |
 | 1a. Source database and seed data | Done |
-| 1b. Business event simulator | Implemented, awaiting verification |
-| 2. Kafka | — |
+| 1b. Business event simulator | Done |
+| 2. Kafka | Implemented, awaiting verification |
 | 3. Debezium CDC | — |
 | 4. Lake foundation | — |
 | 5. Bronze ingestion | — |
@@ -16,6 +16,46 @@ Phase-by-phase build log. Updated at the end of every phase.
 | 8. Trino and dbt Gold | — |
 | 9. Power BI report | — |
 | 10. Hardening and polish | — |
+
+---
+
+## Phase 2: Kafka
+
+**Built**
+- `compose/kafka.yml` (profile `kafka`):
+  - **`kafka`:** `apache/kafka:3.9.2` in KRaft combined mode (broker + controller, node 1, with a fixed `KAFKA_CLUSTER_ID` from `.env`).
+    - **Listeners:** `PLAINTEXT://kafka:9092` for containers and `CONTROLLER://:9093`. There is no host port; use Kafka UI.
+    - **Settings:** `auto.create.topics.enable=false`, 7-day retention, and replication factor 1 everywhere (single broker).
+    - **Resources:** 512 MB heap, 1 GB memory limit, `kafka-data` volume, log rotation.
+    - **Healthcheck:** `kafka-broker-api-versions.sh`.
+  - **`kafka-ui`:** `kafbat/kafka-ui:v1.5.0` on http://localhost:8080. It waits for `kafka` to be healthy and has a healthcheck on `/actuator/health`, a 512 MB limit and log rotation.
+- `infra/kafka/smoke-test.sh`: creates a topic, produces 5 messages, consumes them with offsets, confirms that producing to a missing topic does **not** create it, then deletes the topic.
+- `Makefile`: `make kafka-topics`, `make kafka-smoke`.
+- `.env.example`: Kafka and Kafka UI image tags, cluster ID, retention, heap and memory limits.
+
+**How to run**
+```bash
+make up P=kafka
+make kafka-smoke        # ends with "SMOKE TEST PASSED"
+make kafka-topics
+# Kafka UI: http://localhost:8080
+```
+
+**Decisions**
+- **No `env_file` on Kafka services:** the `apache/kafka` image turns every `KAFKA_*` environment variable into a broker property, so only the explicit `environment:` block is passed (Kafka needs no secrets).
+- **Kafka 3.9.2 rather than 4.x:** keeps the broker on the same major version as the Kafka client inside the Debezium 2.7 Connect image (ADR-001).
+- **Kafka UI is the maintained fork** `kafbat/kafka-ui` (`provectuslabs/kafka-ui` is unmaintained).
+- **No data-volume fix needed:** the image ships `/var/lib/kafka/data` owned by `appuser`, so a new named volume inherits writable ownership.
+
+**Verified**
+- Both services are healthy. The smoke test passes. Kafka UI's API reports cluster `fmcg` ONLINE with 1 broker, version 3.9.
+- Topics survive `down`/`up` (named volume plus fixed cluster ID).
+- The effective broker config shows `auto.create.topics.enable=false` and `log.retention.hours=168`.
+- Idle memory: kafka about 390 MB of 1 GB, kafka-ui about 190 MB of 512 MB.
+
+**Known issues**
+- `docker compose --profile kafka down` while other profiles are running prints "Network fmcg-net Resource is still in use". That's harmless; use `make down` to stop everything.
+- An existing `.env` needs the new Kafka block from `.env.example` added to it (`make env` only creates `.env` when it is missing).
 
 ---
 

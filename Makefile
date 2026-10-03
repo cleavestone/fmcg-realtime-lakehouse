@@ -18,7 +18,7 @@ define not_yet
 endef
 
 .PHONY: help env up demo down nuke ps logs build seed simulate stop-sim scenario \
-        register-connector psql dbt-build reconcile test lint
+        kafka-topics kafka-smoke register-connector psql dbt-build reconcile test lint
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -69,6 +69,14 @@ stop-sim: ## Stop the simulator (graceful: finishes the in-flight event)
 scenario: env ## Run a deterministic scenario: make scenario NAME=<scd2_price_test|scd2_burst_test|order_lifecycle_test|delete_test>
 	@test -n "$(NAME)" || { echo "usage: make scenario NAME=<name>" >&2; exit 1; }
 	$(COMPOSE) --profile sim run --rm simulator scenario $(NAME)
+
+# --- Kafka --------------------------------------------------------------------
+
+kafka-topics: ## List Kafka topics
+	$(COMPOSE) --profile kafka exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
+
+kafka-smoke: ## Broker smoke test: create, produce, consume and delete a test topic
+	$(COMPOSE) --profile kafka exec -T kafka bash < infra/kafka/smoke-test.sh
 
 # --- CDC ----------------------------------------------------------------------
 
