@@ -1,0 +1,16 @@
+# Keep build contexts small; images copy only what they need.
+**/.venv
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.ruff_cache
+.git
+.github
+.env
+docs
+dashboards
+dbt/fmcg/target
+dbt/fmcg/dbt_packages
+dbt/fmcg/logs
+*.md
+!README.md

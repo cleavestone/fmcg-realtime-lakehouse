@@ -1,0 +1,21 @@
+# Root Compose file: shared network and volumes only.
+# Services live in compose/<domain>.yml, each assigned to a profile.
+name: fmcg
+
+include:
+  - compose/source.yml     # profiles: source, sim
+  - compose/kafka.yml      # profile: kafka
+  - compose/cdc.yml        # profile: cdc
+  - compose/lake.yml       # profile: lake
+  - compose/streaming.yml  # profile: streaming
+  - compose/serving.yml    # profile: serving
+
+networks:
+  fmcg-net:
+    name: fmcg-net
+
+volumes:
+  pg-data:
+  kafka-data:
+  minio-data:
+  hms-db-data:

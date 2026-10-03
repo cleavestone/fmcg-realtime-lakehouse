@@ -1,0 +1,3 @@
+# spark-bronze, spark-silver-facts, spark-silver-dims (profile: streaming)
+# Implemented in Phase 5-7.
+services: {}

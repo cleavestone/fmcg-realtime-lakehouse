@@ -1,0 +1,3 @@
+# postgres, seed, simulator (profiles: source, sim)
+# Implemented in Phase 1a/1b.
+services: {}

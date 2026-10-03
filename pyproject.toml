@@ -1,0 +1,27 @@
+# uv workspace root (virtual: no package of its own). See ADR-009.
+[tool.uv.workspace]
+members = ["simulator", "streaming", "dbt"]
+
+[tool.uv]
+required-version = ">=0.9"
+
+[dependency-groups]
+dev = [
+    "detect-secrets==1.5.0",
+    "pre-commit==4.6.2",
+    "pytest==9.1.1",
+    "ruff==0.16.10",
+    "sqlfluff==4.4.0",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = ["dbt/fmcg/target", "dbt/fmcg/dbt_packages"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.pytest.ini_options]
+testpaths = ["simulator/tests", "streaming/tests"]
+addopts = "-ra"

@@ -1,0 +1,35 @@
+# Secrets
+.env
+!.env.example
+
+# Python / uv
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+
+# Spark / Delta local artefacts
+spark-warehouse/
+metastore_db/
+derby.log
+*.crc
+
+# dbt
+dbt/fmcg/target/
+dbt/fmcg/dbt_packages/
+dbt/fmcg/logs/
+logs/
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Private build plan (kept local)
+PLAN.md

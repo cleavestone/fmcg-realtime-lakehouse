@@ -1,0 +1,3 @@
+# trino, dbt, dbt-scheduler (profile: serving)
+# Implemented in Phase 8.
+services: {}
