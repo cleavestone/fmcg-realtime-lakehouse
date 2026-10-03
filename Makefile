@@ -17,7 +17,7 @@ define not_yet
 	@echo "make $@: not implemented until Phase $(1)" >&2; exit 1
 endef
 
-.PHONY: help env up demo down nuke ps logs build seed simulate scenario \
+.PHONY: help env up demo down nuke ps logs build seed simulate stop-sim scenario \
         register-connector psql dbt-build reconcile test lint
 
 help: ## Show this help
@@ -59,11 +59,16 @@ seed: env ## Run the deterministic seed (skips if already populated)
 psql: ## Open psql on the source database
 	$(COMPOSE) --profile source exec postgres sh -c 'psql -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"'
 
-simulate: ## Start the simulator and follow its logs
-	$(call not_yet,1b)
+simulate: env ## Start the live simulator and follow its logs (Ctrl+C stops following, not the simulator)
+	$(COMPOSE) --profile sim up -d simulator
+	$(COMPOSE) --profile sim logs -f --tail=20 simulator
 
-scenario: ## Run a deterministic scenario: make scenario NAME=<name>
-	$(call not_yet,1b)
+stop-sim: ## Stop the simulator (graceful: finishes the in-flight event)
+	$(COMPOSE) --profile sim stop simulator
+
+scenario: env ## Run a deterministic scenario: make scenario NAME=<scd2_price_test|scd2_burst_test|order_lifecycle_test|delete_test>
+	@test -n "$(NAME)" || { echo "usage: make scenario NAME=<name>" >&2; exit 1; }
+	$(COMPOSE) --profile sim run --rm simulator scenario $(NAME)
 
 # --- CDC ----------------------------------------------------------------------
 

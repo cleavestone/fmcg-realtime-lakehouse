@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from simulator.catalog import build_products
-from simulator.config import load_config
+from simulator.config import load_config, section
 from simulator.seed import generate
 
 NOW = datetime(2026, 10, 3, 12, 0, tzinfo=UTC)
@@ -13,7 +13,7 @@ NOW = datetime(2026, 10, 3, 12, 0, tzinfo=UTC)
 
 @pytest.fixture(scope="module")
 def cfg():
-    return load_config()["seed"]
+    return section(load_config(), "seed")
 
 
 @pytest.fixture(scope="module")

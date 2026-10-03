@@ -13,3 +13,8 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
     path = path or Path(os.environ.get("SIM_CONFIG", DEFAULT_CONFIG))
     with path.open() as f:
         return yaml.safe_load(f)
+
+
+def section(cfg: dict[str, Any], name: str) -> dict[str, Any]:
+    """A config section merged over the shared `business` settings."""
+    return {**cfg["business"], **cfg[name]}

@@ -1,4 +1,5 @@
-# postgres + one-shot seed (profile: source). The simulator service (profile: sim) arrives in Phase 1b.
+# postgres + one-shot seed (profile: source) and the live simulator (profile: sim).
+# postgres and seed also carry the sim profile, so `make up P=sim` brings up everything it needs.
 
 x-logging: &logging
   driver: json-file
@@ -51,7 +52,7 @@ services:
       args:
         PYTHON_IMAGE: ${PYTHON_IMAGE:?set PYTHON_IMAGE in .env}
         UV_IMAGE: ${UV_IMAGE:?set UV_IMAGE in .env}
-    profiles: [source]
+    profiles: [source, sim]
     command: ["seed"]
     env_file: ../.env
     depends_on:
@@ -59,6 +60,29 @@ services:
         condition: service_healthy
     networks: [fmcg-net]
     restart: "no"
+    deploy:
+      resources:
+        limits:
+          memory: ${SIMULATOR_MEM_LIMIT:-256m}
+    logging: *logging
+
+  simulator:
+    image: fmcg/simulator:local
+    profiles: [sim]
+    command: ["run"]
+    env_file: ../.env
+    environment:
+      SIM_RATE: ${SIM_RATE:-5}
+      SIM_SEED: ${SIM_SEED:-42}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      seed:
+        condition: service_completed_successfully
+    networks: [fmcg-net]
+    restart: unless-stopped
+    # SIGTERM lets the in-flight event commit before exit; events take milliseconds.
+    stop_grace_period: 15s
     deploy:
       resources:
         limits:

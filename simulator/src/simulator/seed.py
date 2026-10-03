@@ -15,13 +15,12 @@ import random
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone
-from decimal import Decimal
 from typing import Any
 
 import psycopg
 from faker import Faker
 
-from simulator import db
+from simulator import db, rules
 from simulator.catalog import Product, build_products
 
 log = logging.getLogger(__name__)
@@ -40,36 +39,11 @@ class SeedData:
     inventory: list[tuple] = field(default_factory=list)
 
 
-def _weighted(rng: random.Random, weights: dict[str, float]) -> str:
-    keys = list(weights)
-    return rng.choices(keys, weights=[weights[k] for k in keys])[0]
-
-
-def _store_name(fake: Faker, rng: random.Random, channel: str) -> str:
-    if channel == "kiosk":
-        return rng.choice([f"{fake.first_name()}'s Kiosk", f"Duka la {fake.first_name()}"])
-    if channel == "supermarket":
-        return f"{fake.last_name()} Supermarket"
-    return f"{fake.last_name()} Wholesalers"
-
-
 def _status_for_age(cfg: dict, age_hours: float, rng: random.Random) -> str:
     for bucket in cfg["status_by_age"]:
         if age_hours <= bucket["max_age_hours"]:
-            return _weighted(rng, bucket["weights"])
-    return _weighted(rng, cfg["status_by_age"][-1]["weights"])
-
-
-def _pick_products(
-    rng: random.Random, product_ids: list[int], weights: list[float], k: int
-) -> list[int]:
-    """Weighted sample of k distinct products (popular SKUs appear far more often)."""
-    chosen: list[int] = []
-    while len(chosen) < k:
-        pid = rng.choices(product_ids, weights=weights)[0]
-        if pid not in chosen:
-            chosen.append(pid)
-    return chosen
+            return rules.weighted_choice(rng, bucket["weights"])
+    return rules.weighted_choice(rng, cfg["status_by_age"][-1]["weights"])
 
 
 def generate(cfg: dict[str, Any], now: datetime) -> SeedData:
@@ -94,16 +68,16 @@ def generate(cfg: dict[str, Any], now: datetime) -> SeedData:
     channels = cfg["channels"]
     channel_shares = {name: c["share"] for name, c in channels.items()}
     for store_id in range(1, cfg["stores"] + 1):
-        channel = _weighted(rng, channel_shares)
+        channel = rules.weighted_choice(rng, channel_shares)
         lo, hi = channels[channel]["credit_limit"]
         data.stores.append(
             (
                 store_id,
-                _store_name(fake, rng, channel),
+                rules.store_name(fake, rng, channel),
                 channel,
                 rng.choices(region_ids, weights=region_weights)[0],
-                _weighted(rng, cfg["tiers"]),
-                Decimal(rng.randrange(lo, hi + 1, 1000)).quantize(Decimal("0.01")),
+                rules.weighted_choice(rng, cfg["tiers"]),
+                rules.credit_limit(rng, lo, hi),
             )
         )
 
@@ -162,15 +136,11 @@ def generate(cfg: dict[str, Any], now: datetime) -> SeedData:
 
         ch = channels[channel]
         n_lines = order_rng.randint(*ch["lines"])
-        for pid in _pick_products(order_rng, product_ids, product_weights, n_lines):
-            qty = order_rng.randint(*ch["qty"])
-            if is_case[pid]:
-                qty = max(1, qty // cfg["case_qty_divisor"])
-            discount = Decimal(str(order_rng.choice(cfg["tier_discounts"][tier]))).quantize(
-                Decimal("0.01")
-            )
+        for pid in rules.pick_distinct(order_rng, product_ids, product_weights, n_lines):
+            qty = rules.line_quantity(order_rng, ch["qty"], is_case[pid], cfg["case_qty_divisor"])
+            disc = rules.discount(order_rng, cfg["tier_discounts"][tier])
             item_id += 1
-            data.order_items.append((item_id, order_id, pid, qty, price_of[pid], discount))
+            data.order_items.append((item_id, order_id, pid, qty, price_of[pid], disc))
 
     # Inventory: current stock per product and warehouse; a slice starts low for restocks
     inv = cfg["inventory"]

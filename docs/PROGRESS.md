@@ -5,8 +5,8 @@ Phase-by-phase build log. Updated at the end of every phase.
 | Phase | Status |
 |---|---|
 | 0. Scaffold and architecture docs | Done |
-| 1a. Source database and seed data | Implemented, awaiting verification |
-| 1b. Business event simulator | — |
+| 1a. Source database and seed data | Done |
+| 1b. Business event simulator | Implemented, awaiting verification |
 | 2. Kafka | — |
 | 3. Debezium CDC | — |
 | 4. Lake foundation | — |
@@ -16,6 +16,62 @@ Phase-by-phase build log. Updated at the end of every phase.
 | 8. Trino and dbt Gold | — |
 | 9. Power BI report | — |
 | 10. Hardening and polish | — |
+
+---
+
+## Phase 1b: Business event simulator
+
+**Built**
+- `simulator/src/simulator/`:
+  - `rules.py`: pure business rules shared by the seed and the simulator. It covers the order state machine (forward only; delivered and cancelled are terminal; only placed or confirmed can be cancelled), stock allocation (never negative), price changes (cents, floor of 1.00), one-step tier moves, credit-limit rounding, weighted picks and line quantities.
+  - `events.py`: one function per event, covering all 10 events from the spec. Each runs in the caller's transaction and raises `Skip` (with a reason) when there is no valid target.
+    - **New orders:** take current prices under `FOR SHARE`, lock stock rows in `product_id` order, and shrink or drop lines that are out of stock.
+    - **Cancellations:** return stock to the store's regional warehouse.
+    - **Hard deletes:** remove the order items first, then the order.
+  - `runner.py`: continuous mode.
+    - **Timing:** inter-arrival times are drawn from an exponential distribution at `--rate`, with an optional time-of-day multiplier. Product popularity is relearned from order history every 5 minutes.
+    - **Logging:** one `event=… status=ok|skipped|failed entity_id=… latency_ms=…` line per event, plus a `summary` line every 30 s (events/s by type).
+    - **Shutdown:** SIGTERM and SIGINT set a flag that is checked between events, so in-flight transactions always finish.
+  - `scenarios.py`: `scd2_price_test`, `scd2_burst_test`, `order_lifecycle_test` and `delete_test`.
+    - **Commits:** every step commits separately, so each change gets its own WAL LSN.
+    - **Output:** each scenario prints the IDs it touched and the expected Silver/Gold result, then checks Postgres and exits non-zero on a mismatch.
+  - `config.yaml` is restructured into four sections:
+    - `business` (shared)
+    - `seed`
+    - `simulator`, which holds event weights, dispatch batch, price and credit ranges, restock thresholds, the active-product floor, hard-delete age, reserved fixtures and the time-of-day curve
+    - `scenarios`
+  - CLI: `python -m simulator run [--rate] [--duration] [--seed]` (`SIM_RATE` and `SIM_SEED` env vars work too) and `python -m simulator scenario <name>`.
+- `compose/source.yml`: a `simulator` service (profile `sim`) on the same image, with `restart: unless-stopped` and `stop_grace_period: 15s`. It waits for `postgres` to be healthy and `seed` to complete. `postgres` and `seed` also carry the `sim` profile.
+- `Makefile`: `make simulate` (start and follow logs), `make stop-sim` and `make scenario NAME=…`.
+- `simulator/tests/test_rules.py`: 20 tests for the state machine, allocation, pricing, tiers, credit limits, distinct picks, and that the config weights match the event registry and sample in proportion. 31 tests in total.
+
+**How to run**
+```bash
+make simulate                              # live business; Ctrl+C stops following logs only
+make stop-sim                              # graceful stop (SIGTERM)
+make scenario NAME=scd2_price_test         # also: scd2_burst_test, order_lifecycle_test, delete_test
+docker compose --profile sim run --rm simulator run --rate 20 --duration 60   # ad-hoc run
+```
+
+**Decisions**
+- **Status advances are dispatch batches:** each advance event moves 3–7 of the oldest open orders one step. With ~50% new orders and ~30% advances, single-order advances would leave the open-order backlog growing forever. Batching keeps it flat (measured: it stays below ~50 open orders at 50 events/s).
+- **Reserved scenario fixtures** (`simulator.reserved`: stores 1 and 3, product 1):
+  - **Why:** the live simulator never selects these stores or their orders, and never changes these products, so scenarios give the same result while the simulator runs. Without this, the simulator advanced the lifecycle test's order mid-scenario.
+  - **How:** YAML anchors keep the reserved IDs and the scenario config in sync.
+- **`delete_test`** deletes a cancelled order of reserved store 3, creating and cancelling one first if needed, so it never collides with the simulator's own `hard_delete`.
+- **Product popularity is learned from `order_items`**, so live orders keep the seed's 80/20 skew without duplicating the ranking logic.
+- **Time-of-day rhythm is off by default** (`simulator.time_of_day.enabled`), so evening demos aren't nearly idle.
+- **Shared business settings:** `config.yaml` sections `seed` and `simulator` are each merged over `business` (`config.section()`).
+
+**Verified**
+- At `--rate 5`, the summary lines show 4.9–5.1 events/s with the configured mix. A 2-minute run at 50 events/s gave 0 failures, a stable backlog, stock recovering through restocks, and 0 orders without lines.
+- All 4 scenarios pass twice in a row with the live simulator running.
+- `docker compose stop simulator` logs "received SIGTERM … stopped cleanly" and exits 0 within a second.
+
+**Known issues**
+- At high `--rate` the achieved rate falls short (about 37/s at `--rate 50`) because event time isn't subtracted from the wait. At the default 5/s, the difference is negligible.
+- With the spec weights, a long run grows the master data quickly. At 5 events/s that's about 360 new stores per hour, and discontinuations hit the `min_active_products: 150` floor within about an hour, after which they are skipped. Lower `new_store` / `product_discontinued` in `config.yaml` for all-day runs.
+- Cancelling a *seeded* historical order returns stock that the seed never deducted (the seed sets current inventory directly). This is harmless for the demo.
 
 ---
 

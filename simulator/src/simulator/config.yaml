@@ -1,16 +1,14 @@
-# Simulator configuration. Phase 1a: seed only (event weights arrive with the simulator).
+# Simulator configuration.
+#   business:  the company itself, shared by the seed and the live simulator
+#   seed:      one-off historical load
+#   simulator: live event mix, rates and realism knobs
+#   scenarios: deterministic verification scripts
 
-seed:
-  random_seed: 42
-  history_days: 30          # backfill window for historical orders, ending now
-  orders_per_day: 80        # baseline before weekday factors and jitter
-  stores: 50
-  sales_reps: 10            # assigned round-robin across regions
+business:
   country: Kenya
-  timezone_offset_hours: 3  # EAT (UTC+3, no DST); business hours are local time
-  business_hours: [7, 19]   # orders are placed between 07:00 and 19:00 local
+  timezone_offset_hours: 3  # EAT (UTC+3, no DST)
 
-  # Region weight drives both store placement and order volume.
+  # Region weight drives store placement, order volume and new-store onboarding.
   regions:
     - {name: Nairobi, weight: 0.35, warehouse: nairobi_dc}
     - {name: Central, weight: 0.20, warehouse: nairobi_dc}
@@ -19,9 +17,6 @@ seed:
     - {name: Western, weight: 0.12, warehouse: kisumu_dc}
 
   warehouses: [nairobi_dc, mombasa_dc, kisumu_dc]
-
-  # Monday=0 .. Sunday=6
-  weekday_factors: [1.0, 1.0, 1.0, 1.05, 1.15, 0.9, 0.6]
 
   # Share of stores per channel, how often each channel orders, and order shape.
   channels:
@@ -38,6 +33,17 @@ seed:
   # Case SKUs are ordered in far smaller quantities than single units.
   case_qty_divisor: 6
 
+seed:
+  random_seed: 42
+  history_days: 30          # backfill window for historical orders, ending now
+  orders_per_day: 80        # baseline before weekday factors and jitter
+  stores: 50
+  sales_reps: 10            # assigned round-robin across regions
+  business_hours: [7, 19]   # historical orders are placed between 07:00 and 19:00 local
+
+  # Monday=0 .. Sunday=6
+  weekday_factors: [1.0, 1.0, 1.0, 1.05, 1.15, 0.9, 0.6]
+
   # Historical status by order age; anything older than the last bucket uses the last bucket.
   status_by_age:
     - {max_age_hours: 6, weights: {placed: 0.60, confirmed: 0.35, cancelled: 0.05}}
@@ -47,5 +53,66 @@ seed:
 
   inventory:
     qty: [50, 1500]
-    low_stock_share: 0.10   # SKUs/warehouse pairs that start low, so restocks have targets
+    low_stock_share: 0.10   # SKU/warehouse pairs that start low, so restocks have targets
     low_stock_qty: [0, 20]
+
+simulator:
+  rate: 5                   # mean events/second (overridden by --rate / SIM_RATE)
+  random_seed: 42           # event-choice stream (overridden by --seed / SIM_SEED)
+  summary_interval_seconds: 30
+  popularity_refresh_seconds: 300  # re-learn product popularity from order history
+
+  # Relative weights (normalised at runtime).
+  event_weights:
+    new_order: 50
+    advance_order: 30
+    restock: 6
+    cancel_order: 4
+    price_change: 4
+    store_change: 2
+    new_store: 2
+    rep_reassigned: 1
+    product_discontinued: 0.5
+    hard_delete: 0.5
+
+  # A status advance is a dispatch run: it moves a batch of the oldest open orders one step.
+  # Each order needs 3 steps, so ~50 new orders per 30 advance events needs batches of ~5
+  # to keep the open-order backlog flat instead of growing forever.
+  advance_candidates: 50
+  advance_batch: [3, 7]
+
+  price_change_pct: [3, 10]       # +/- percent
+  credit_change_pct: [10, 25]     # +/- percent
+  store_change_tier_share: 0.5    # rest are credit-limit changes
+  restock:
+    low_stock_threshold: 100      # qty_on_hand below this is eligible
+    qty: [300, 1500]
+  min_active_products: 150        # never discontinue below this
+  hard_delete_min_age_hours: 24   # only purge cancelled orders older than this
+
+  # Fixtures owned by the scenarios. The live simulator never selects these stores (or their
+  # orders) or changes these products, so scenarios stay deterministic while it runs.
+  reserved:
+    store_ids: [&burst_store 1, &lifecycle_store 3]
+    product_ids: [&price_product 1]
+
+  # Event-rate multiplier by local hour (0..23). Off by default so evening demos stay lively.
+  time_of_day:
+    enabled: false
+    multipliers: [0.2, 0.1, 0.1, 0.1, 0.1, 0.3, 0.6, 1.0, 1.4, 1.6, 1.6, 1.5,
+                  1.4, 1.5, 1.6, 1.5, 1.3, 1.1, 0.9, 0.7, 0.5, 0.4, 0.3, 0.2]
+
+scenarios:
+  scd2_price_test:
+    product_id: *price_product    # Tamu Cola 330ml
+    price_changes_pct: [5, -3, 8]
+    pause_seconds: 1.0
+  scd2_burst_test:
+    store_id: *burst_store
+    changes: 3
+    pause_seconds: 0.2            # all three land well inside one 30s Spark trigger
+  order_lifecycle_test:
+    store_id: *lifecycle_store
+    pause_seconds: 1.0
+  delete_test:
+    store_id: *lifecycle_store    # deletes a cancelled order of this reserved store
