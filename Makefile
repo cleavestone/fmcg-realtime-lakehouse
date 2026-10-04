@@ -19,6 +19,7 @@ endef
 
 .PHONY: help env up demo down nuke ps logs build seed simulate stop-sim scenario \
         kafka-topics kafka-smoke register-connector connector-status cdc-counts cdc-tail spark-smoke \
+        bronze-check spark-shell test-host test-streaming \
         psql dbt-build reconcile test lint
 
 help: ## Show this help
@@ -84,6 +85,12 @@ kafka-smoke: ## Broker smoke test: create, produce, consume and delete a test to
 spark-smoke: env ## Lake smoke test: write a Delta table to MinIO, register it in HMS, read it back
 	$(COMPOSE) --profile lake --profile streaming run --rm spark-bronze python -m streaming.smoke_test
 
+bronze-check: ## Bronze rows per table/op, quarantine count, duplicate-offset check
+	$(COMPOSE) --profile streaming run --rm --no-deps spark-bronze python -m streaming.tools.bronze_check
+
+spark-shell: ## Interactive PySpark shell with the lake config (Delta, HMS, MinIO)
+	$(COMPOSE) --profile streaming run --rm --no-deps spark-bronze pyspark
+
 # --- CDC ----------------------------------------------------------------------
 
 register-connector: env ## Create/update the Debezium connector (idempotent) and wait for RUNNING
@@ -110,8 +117,13 @@ dbt-build: ## Run dbt build against Trino
 
 # --- Quality ------------------------------------------------------------------
 
-test: ## Run pytest (exit code 5 = no tests collected yet, treated as success)
-	uv run --frozen pytest || [ $$? -eq 5 ]
+test: test-host test-streaming ## Run all tests (host + Spark container)
+
+test-host: ## Host tests (simulator) with uv
+	uv run --frozen pytest
+
+test-streaming: env ## Spark unit tests inside the Spark test image (Java is not needed on the host)
+	$(COMPOSE) --profile test run --rm --build spark-test
 
 lint: ## Run all pre-commit hooks on every file
 	uv run --frozen pre-commit run --all-files

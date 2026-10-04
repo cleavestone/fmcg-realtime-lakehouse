@@ -72,9 +72,13 @@ The seed is loaded once into Postgres. Debezium's initial snapshot (`snapshot.mo
 ## 5. Medallion layers
 
 ### Bronze: raw and replayable
-- One row per Kafka record: parsed payload, `op`, `source_ts_ms`, `source_lsn`, `is_deleted`, `kafka_topic`, `kafka_partition`, `kafka_offset`, `ingested_at`, partitioned by `ingest_date`.
-- Append-only. `(kafka_topic, kafka_partition, kafka_offset)` is unique; checkpoints guarantee this across restarts.
-- Malformed records go to a quarantine table instead of being dropped.
+- One streaming query subscribes to all `fmcg.public.*` topics. `foreachBatch` routes each micro-batch to `bronze.<table>`, writing the tables in parallel.
+- One row per Kafka record:
+  - **Payload:** the **raw JSON payload** (verbatim, so no field is ever lost to schema drift), plus `kafka_key`.
+  - **CDC metadata:** the parsed `op`, `source_ts_ms`, `source_lsn` and `is_deleted`.
+  - **Kafka coordinates and ingest time:** `kafka_topic`, `kafka_partition`, `kafka_offset`, `kafka_timestamp` and `ingested_at`, with the table partitioned by `ingest_date`. Typed parsing is Silver's job.
+- Append-only (`delta.appendOnly`). Exactly-once: the checkpoint tracks Kafka offsets, and each Delta write carries `txnAppId`/`txnVersion=batch_id`, so a batch replayed after a crash is skipped. `(kafka_topic, kafka_partition, kafka_offset)` is unique.
+- Records that can't be trusted (tombstone, invalid JSON, missing `__op`/`__source_lsn`/`__source_ts_ms`) go to `bronze.quarantine` with a reason. This is the pipeline's dead-letter layer (ADR-002).
 
 ### Silver: typed and deduplicated
 - Reads **Bronze Delta as a stream**, not Kafka ([ADR-003](adr/ADR-003-medallion-silver-reads-bronze.md)).

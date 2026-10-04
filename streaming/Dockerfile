@@ -25,7 +25,21 @@ ENV JAVA_HOME=/opt/java \
     SPARK_CONF_DIR=/opt/spark/conf \
     PATH=/app/.venv/bin:$PATH
 
+# Pinned JARs from Maven Central, each verified against its SHA-1. Kept in their own early
+# layer so a Python dependency change doesn't re-download ~330 MB.
+ARG MAVEN_REPO=https://repo1.maven.org/maven2
+COPY streaming/jars.txt /tmp/jars.txt
+RUN set -eu; mkdir -p /opt/spark-jars; \
+    grep -Ev '^\s*(#|$)' /tmp/jars.txt | while IFS=: read -r group artifact version; do \
+      path="$(echo "$group" | tr . /)/${artifact}/${version}/${artifact}-${version}.jar"; \
+      curl -fsSL -o "/opt/spark-jars/${artifact}-${version}.jar" "${MAVEN_REPO}/${path}"; \
+      echo "$(curl -fsSL "${MAVEN_REPO}/${path}.sha1" | cut -c1-40)  /opt/spark-jars/${artifact}-${version}.jar" | sha1sum -c -; \
+    done
+
 WORKDIR /app
+
+# INSTALL_TEST=true builds the test variant (adds the streaming `test` group: pytest).
+ARG INSTALL_TEST=false
 
 # 1) Python dependencies only (cached until uv.lock or a pyproject changes).
 COPY pyproject.toml uv.lock ./
@@ -33,26 +47,21 @@ COPY simulator/pyproject.toml simulator/pyproject.toml
 COPY streaming/pyproject.toml streaming/pyproject.toml
 COPY dbt/pyproject.toml dbt/pyproject.toml
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --package streaming --no-install-workspace
+    uv sync --frozen --no-dev --package streaming --no-install-workspace \
+      $([ "$INSTALL_TEST" = true ] && echo --group test)
 
-# 2) Pinned JARs from Maven Central into pyspark's jars dir, each verified against its SHA-1.
-ARG MAVEN_REPO=https://repo1.maven.org/maven2
-COPY streaming/jars.txt /tmp/jars.txt
-RUN set -eu; \
-    jars_dir="$(/app/.venv/bin/python -c 'import pyspark, os; print(os.path.join(os.path.dirname(pyspark.__file__), "jars"))')"; \
-    grep -Ev '^\s*(#|$)' /tmp/jars.txt | while IFS=: read -r group artifact version; do \
-      path="$(echo "$group" | tr . /)/${artifact}/${version}/${artifact}-${version}.jar"; \
-      curl -fsSL -o "${jars_dir}/${artifact}-${version}.jar" "${MAVEN_REPO}/${path}"; \
-      echo "$(curl -fsSL "${MAVEN_REPO}/${path}.sha1" | cut -c1-40)  ${jars_dir}/${artifact}-${version}.jar" | sha1sum -c -; \
-    done
+# 2) Link the pinned JARs into pyspark's jars dir (they're on Spark's classpath from there).
+RUN jars_dir="$(/app/.venv/bin/python -c 'import pyspark, os; print(os.path.join(os.path.dirname(pyspark.__file__), "jars"))')" \
+ && ln -s /opt/spark-jars/*.jar "$jars_dir"/
 
 # 3) The streaming package and Spark config.
 COPY streaming/conf /opt/spark/conf
 COPY streaming/src streaming/src
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --package streaming --no-editable
+    uv sync --frozen --no-dev --package streaming --no-editable \
+      $([ "$INSTALL_TEST" = true ] && echo --group test)
 
 RUN useradd --system --uid 10001 --create-home --home-dir /home/spark spark
 USER spark
 
-CMD ["python", "-m", "streaming.smoke_test"]
+CMD ["python", "-m", "streaming.bronze.ingest_cdc"]

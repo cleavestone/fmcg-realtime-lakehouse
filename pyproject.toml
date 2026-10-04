@@ -23,5 +23,6 @@ extend-exclude = ["dbt/fmcg/target", "dbt/fmcg/dbt_packages"]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
 
 [tool.pytest.ini_options]
-testpaths = ["simulator/tests", "streaming/tests"]
+# Host tests only. Spark tests need Java, so they run in the Spark image: make test-streaming.
+testpaths = ["simulator/tests"]
 addopts = "-ra"

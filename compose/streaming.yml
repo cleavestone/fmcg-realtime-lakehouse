@@ -1,6 +1,6 @@
 # Spark streaming jobs (profile: streaming), one job per container, Spark in local mode.
-# Phase 4 defines the shared image and spark-bronze, used for the lake smoke test;
-# the Bronze/Silver jobs and their Spark UIs arrive in Phases 5-7.
+# Compose restarts a crashed job; its checkpoint on MinIO makes it resume exactly where it
+# stopped. spark-test (profile: test) runs the Spark unit tests in the same image.
 
 x-logging: &logging
   driver: json-file
@@ -18,15 +18,54 @@ services:
         PYTHON_IMAGE: ${PYTHON_IMAGE:?set PYTHON_IMAGE in .env}
         UV_IMAGE: ${UV_IMAGE:?set UV_IMAGE in .env}
     profiles: [streaming]
+    command: ["python", "-m", "streaming.bronze.ingest_cdc"]
     environment:
       AWS_ACCESS_KEY_ID: ${LAKE_ACCESS_KEY:?set LAKE_ACCESS_KEY in .env}
       AWS_SECRET_ACCESS_KEY: ${LAKE_SECRET_KEY:?set LAKE_SECRET_KEY in .env}
       SPARK_DRIVER_MEMORY: ${SPARK_DRIVER_MEMORY:-1g}
+      SPARK_MASTER: ${SPARK_MASTER:-local[2]}
+      # glibc gives every JVM thread its own malloc arena; capping them stops native memory
+      # fragmentation from pushing the container towards its limit.
+      MALLOC_ARENA_MAX: 2
+      BRONZE_TRIGGER_SECONDS: ${BRONZE_TRIGGER_SECONDS:-30}
+      BRONZE_MAX_OFFSETS_PER_TRIGGER: ${BRONZE_MAX_OFFSETS_PER_TRIGGER:-50000}
+    ports:
+      - "4040:4040"   # Spark UI
     depends_on:
+      kafka:
+        condition: service_healthy
       hive-metastore:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
+    networks: [fmcg-net]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:4040/api/v1/applications > /dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 90s
+    restart: unless-stopped
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: ${SPARK_MEM_LIMIT:-2g}
+    logging: *logging
+
+  spark-test:
+    image: fmcg/spark:test
+    build:
+      context: ..
+      dockerfile: streaming/Dockerfile
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE:?set PYTHON_IMAGE in .env}
+        UV_IMAGE: ${UV_IMAGE:?set UV_IMAGE in .env}
+        INSTALL_TEST: "true"
+    profiles: [test]
+    command: ["python", "-m", "pytest", "-p", "no:cacheprovider", "-q", "streaming/tests"]
+    volumes:
+      - ../streaming/tests:/app/streaming/tests:ro
     networks: [fmcg-net]
     restart: "no"
     deploy:

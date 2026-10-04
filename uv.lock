@@ -598,11 +598,19 @@ dependencies = [
     { name = "pyspark" },
 ]
 
+[package.dev-dependencies]
+test = [
+    { name = "pytest" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "delta-spark", specifier = "==3.3.3" },
     { name = "pyspark", specifier = "==3.5.9" },
 ]
+
+[package.metadata.requires-dev]
+test = [{ name = "pytest", specifier = "==9.1.1" }]
 
 [[package]]
 name = "tblib"

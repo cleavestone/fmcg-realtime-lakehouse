@@ -1,4 +1,4 @@
-# Single-node Kafka in KRaft mode + Kafka UI (profiles: kafka, cdc). See ADR-001.
+# Single-node Kafka in KRaft mode + Kafka UI (profiles: kafka, cdc, streaming). See ADR-001.
 # No env_file here: the apache/kafka image turns every KAFKA_* variable into a broker
 # property, so only the explicit settings below reach the container.
 
@@ -11,7 +11,7 @@ x-logging: &logging
 services:
   kafka:
     image: ${KAFKA_IMAGE:?set KAFKA_IMAGE in .env}
-    profiles: [kafka, cdc]
+    profiles: [kafka, cdc, streaming]
     hostname: kafka
     environment:
       CLUSTER_ID: ${KAFKA_CLUSTER_ID:?set KAFKA_CLUSTER_ID in .env}

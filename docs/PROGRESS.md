@@ -9,13 +9,64 @@ Phase-by-phase build log. Updated at the end of every phase.
 | 1b. Business event simulator | Done |
 | 2. Kafka | Done |
 | 3. Debezium CDC | Done |
-| 4. Lake foundation | Implemented, awaiting verification |
-| 5. Bronze ingestion | — |
+| 4. Lake foundation | Done |
+| 5. Bronze ingestion | Implemented, awaiting verification |
 | 6. Silver facts | — |
 | 7. Silver dimensions (SCD2) | — |
 | 8. Trino and dbt Gold | — |
 | 9. Power BI report | — |
 | 10. Hardening and polish | — |
+
+---
+
+## Phase 5: Bronze ingestion
+
+**Built**
+- `streaming/src/streaming/bronze/ingest_cdc.py`: one Structured Streaming query over `subscribePattern=fmcg\.public\..*`.
+  - **Source options:** starts from `earliest`, `maxOffsetsPerTrigger=50000`, `failOnDataLoss=true`, and `kafka.metadata.max.age.ms=30000` (new topics are discovered within 30 s rather than 5 min).
+  - **Trigger and checkpoint:** a 30 s trigger (`BRONZE_TRIGGER_SECONDS`), with the checkpoint at `s3a://checkpoints/bronze/ingest_cdc`.
+  - **Writes:** `foreachBatch` routes rows to `bronze.<table>` (and `bronze.quarantine`) and writes the tables **in parallel**. Path writes carry `txnAppId`/`txnVersion=batch_id` for exactly-once.
+  - **Tables:** Delta, partitioned by `ingest_date`, with `delta.appendOnly` and `delta.autoOptimize.autoCompact`.
+- `streaming/src/streaming/bronze/transform.py`: pure parsing and quarantine logic. The **raw JSON payload** is stored verbatim; only the CDC metadata (`op`, `source_lsn`, `source_ts_ms`, `is_deleted`) and the routing table name are parsed.
+- `streaming/src/streaming/common/config.py`: job settings from the environment.
+- `streaming/src/streaming/tools/bronze_check.py`: rows per table and op, quarantine reasons, and the duplicate `(topic, partition, offset)` check.
+- `compose/streaming.yml`:
+  - **`spark-bronze`:** runs the job, with the Spark UI on :4040, a healthcheck on the UI's REST API, and `restart: unless-stopped`. It waits for `kafka` and `hive-metastore` to be healthy and `minio-init` to complete. `kafka` joins the `streaming` profile.
+  - **`spark-test`:** profile `test`; the same image built with `INSTALL_TEST=true`.
+- Spark tests run **inside the container** (`streaming/tests/`, `conftest.py` with a local Delta-enabled session): `make test-streaming`. `make test` runs host tests and container tests, and host pytest now only collects `simulator/tests`.
+- `Makefile`: `bronze-check`, `spark-shell`, `test-host`, `test-streaming`.
+- `runbook.md`: a Bronze section (crashed job, data loss, re-ingest, quarantine).
+
+**How to run**
+```bash
+docker compose --profile cdc --profile streaming up -d   # source, kafka, connect, lake, spark-bronze
+make logs S=spark-bronze      # one "batch=N rows=… duration_s=…" line per micro-batch
+make bronze-check             # rows per table/op + "NO DUPLICATES"
+# Spark UI: http://localhost:4040 (Structured Streaming tab)
+```
+
+**Decisions**
+- **Raw JSON payload in Bronze** (approved deviation from "parsed payload"): a Postgres schema change can never break Bronze or silently drop a field. Silver owns the typed per-table schemas.
+- **One query, seven tables:** a single Kafka read, checkpoint and Spark UI, which is lighter on a laptop than seven queries. Exactly-once comes from Delta's idempotent writes (`txnAppId`/`txnVersion`).
+- **Spark tests run in the Spark image** (approved): the host has no Java, by design.
+- **JARs are downloaded in an early, independent Docker layer** (`/opt/spark-jars`, symlinked into pyspark), so dependency changes don't re-download about 330 MB.
+- **Laptop-sized Spark** (measured):
+  - **Delta snapshots:** `spark.databricks.delta.snapshotPartitions=2`. Delta's default 50 produced about 57-task jobs per commit for tiny tables.
+  - **Cores and shuffle:** `SPARK_MASTER=local[2]` per job, `spark.sql.shuffle.partitions=4`.
+  - **Native memory:** `MALLOC_ARENA_MAX=2` capped glibc arena fragmentation.
+  - **Result:** batch time went from 40–55 s (falling behind the 30 s trigger) to 12–20 s, and memory from 1.82 GB to about 1.55 GB.
+
+**Verified** (clean start: `make nuke`, then `cdc` + `streaming`, with the simulator running)
+- **Snapshot:** batch 0 ingested the whole snapshot (13,227 rows: inventory 600, order_items 10,045, orders 2,317, products 200, regions 5, sales_reps 10, stores 50), all `op='r'`.
+- **Live changes:** later batches carried `c`/`u`/`d` events every 30 s, and the counts grew.
+- **Kill test:** `docker compose kill spark-bronze` (SIGKILL) 4 s into batch 28, then a restart. Batch 28 re-ran from the checkpoint. With the simulator stopped and Bronze caught up, **every Bronze table's row count equals Kafka's message count** (for example orders 13,263 / 13,263 and order_items 21,728 / 21,728), and `make bronze-check` reports `NO DUPLICATES`.
+- **Tests:** `make test` gives 31 host tests and 5 Spark tests (parsing, deletes, snapshot reads, 7 quarantine reasons, column contract), all passing.
+- **Idle CPU:** about 0.4% (CPU is only used while a batch runs).
+
+**Known issues**
+- **The first batch after a (re)start takes about 50–90 s** (JVM warm-up, table creation, Delta log loading). Later batches take 12–20 s.
+- **Memory is tight on this machine.** WSL has 11.6 GB, and containers from other projects were using CPU and RAM during testing. With three Spark jobs (Phase 7) plus Trino (Phase 8), the stack needs about 10 GB. Stop unrelated containers, or raise the WSL memory in `%UserProfile%\.wslconfig` (`memory=14GB`).
+- An existing `.env` needs the new `SPARK_MASTER` and Bronze block from `.env.example`.
 
 ---
 
