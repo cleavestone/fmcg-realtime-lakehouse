@@ -29,6 +29,9 @@ Operational procedures. Filled in as each component lands; completed in Phase 10
 3. Restart the task: `curl -X POST "localhost:8083/connectors/fmcg-postgres/restart?includeTasks=true&onlyFailed=true"`.
    Because the replication slot kept the WAL, the connector resumes at its last committed LSN and nothing is lost.
 
+### Task FAILED after a Postgres restart
+If Postgres restarts outside Compose (or before this fix existed), the Debezium task can fail to reconnect and stay `FAILED`; Kafka Connect never retries it. Run `make connector-restart`; it resumes from the replication slot and nothing is lost. When Compose restarts or recreates Postgres, `kafka-connect` is restarted with it automatically (`depends_on … restart: true`). Note that editing `.env` makes Compose recreate every service that uses `env_file`, including Postgres.
+
 ### Connect was down for a while
 Nothing to do. On start it resumes from its offset in `connect-offsets`, and the slot kept the WAL. Verified: a 20-second outage with the simulator running lost no changes.
 
@@ -63,6 +66,21 @@ docker compose --profile streaming up -d spark-bronze
 `make bronze-check` lists the reasons. Inspect with `make spark-shell`:
 `spark.table("bronze.quarantine").select("kafka_topic", "kafka_offset", "quarantine_reason", "payload").show(truncate=False)`.
 
+## Silver facts (Spark)
+
+| Check | Command |
+|---|---|
+| Job running, per-table batches | `make logs S=spark-silver-facts` (`table=orders batch=N keys=… duration_s=…`) |
+| Spark UI | http://localhost:4041 |
+| Silver equals Postgres | `make stop-sim`, then `make reconcile` (retries up to 3 min while Silver catches up; must print `RECONCILED`) |
+| Query anything | `make spark-sql Q="SELECT * FROM silver.orders WHERE order_id = 2427"` |
+
+### Silver job crashed or was killed
+Nothing to do: Compose restarts it and each table's query resumes from `s3a://checkpoints/silver/<table>`. A replayed batch is a no-op thanks to the LSN guard. Verified with a SIGKILL during a live run, followed by `make reconcile`.
+
+### Rebuild Silver facts from Bronze
+After a bug fix in Silver logic, or to recover from bad Silver data: `make silver-facts-rebuild`. It stops the job, drops `silver.orders`, `silver.order_items` and `silver.inventory`, deletes their data and checkpoints on MinIO, and restarts the job, which replays the whole Bronze history (`batch=0` holds everything). Kafka isn't involved.
+
 ## Procedures (to be written)
 
-- Replay Silver from Bronze (Phase 6/7)
+- Rebuild Silver dimensions (Phase 7)

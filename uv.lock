@@ -595,6 +595,7 @@ version = "0.1.0"
 source = { editable = "streaming" }
 dependencies = [
     { name = "delta-spark" },
+    { name = "psycopg", extra = ["binary"] },
     { name = "pyspark" },
 ]
 
@@ -606,6 +607,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "delta-spark", specifier = "==3.3.3" },
+    { name = "psycopg", extras = ["binary"], specifier = "==3.3.6" },
     { name = "pyspark", specifier = "==3.5.9" },
 ]
 

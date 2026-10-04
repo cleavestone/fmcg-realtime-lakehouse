@@ -12,6 +12,7 @@ class Settings:
     checkpoint_uri: str
     bronze_trigger_seconds: int
     bronze_max_offsets_per_trigger: int
+    silver_trigger_seconds: int
 
 
 def load_settings() -> Settings:
@@ -23,4 +24,5 @@ def load_settings() -> Settings:
         checkpoint_uri=env("CHECKPOINT_URI", "s3a://checkpoints"),
         bronze_trigger_seconds=int(env("BRONZE_TRIGGER_SECONDS", "30")),
         bronze_max_offsets_per_trigger=int(env("BRONZE_MAX_OFFSETS_PER_TRIGGER", "50000")),
+        silver_trigger_seconds=int(env("SILVER_TRIGGER_SECONDS", "30")),
     )

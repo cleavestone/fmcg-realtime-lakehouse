@@ -10,12 +10,64 @@ Phase-by-phase build log. Updated at the end of every phase.
 | 2. Kafka | Done |
 | 3. Debezium CDC | Done |
 | 4. Lake foundation | Done |
-| 5. Bronze ingestion | Implemented, awaiting verification |
-| 6. Silver facts | — |
+| 5. Bronze ingestion | Done |
+| 6. Silver facts | Implemented, awaiting verification |
 | 7. Silver dimensions (SCD2) | — |
 | 8. Trino and dbt Gold | — |
 | 9. Power BI report | — |
 | 10. Hardening and polish | — |
+
+---
+
+## Phase 6: Silver facts (current state)
+
+**Built**
+- `streaming/src/streaming/common/schemas.py`: `TableSpec` (keys and typed columns) for `orders`, `order_items` and `inventory`. Money is `DECIMAL(12,2)`, discount is `DECIMAL(5,2)`, timestamps are `TIMESTAMP`.
+- `streaming/src/streaming/silver/facts.py`: the pure, unit-tested logic.
+  - **`parse()`:** raw payload to typed columns.
+  - **`latest_per_key()`:** one row per key. LSN, time and the delete flag come from the newest event; business values come from the newest non-delete event (`has_values`).
+  - **`merge_latest()`:** the LSN-guarded Delta MERGE. A delete-only batch sets only the flag, and a delete for an unseen key is inserted as a deleted row.
+- `streaming/src/streaming/silver/upsert_facts.py`: one Spark app (`spark-silver-facts`, UI on :4041) with one streaming query per table.
+  - **Reading:** `bronze.<table>` as a Delta stream, with checkpoints at `s3a://checkpoints/silver/<table>` and a 30 s trigger (`SILVER_TRIGGER_SECONDS`).
+  - **Writing:** `silver.<table>` (`s3a://lakehouse/silver/<table>`, autoCompact) gets the business columns plus `source_lsn`, `source_ts_ms`, `is_deleted` and `silver_updated_at`.
+  - **Startup:** it waits for the Bronze tables to exist.
+- Tools (`spark-tools` service, profile `tools`):
+  - `make reconcile`: an exact row-by-row, column-by-column comparison of live Silver rows with Postgres, using the read-only `debezium` user, retrying for up to 3 minutes.
+  - `make spark-sql Q="…"`.
+  - `make silver-facts-rebuild` (`streaming.tools.reset_tables`). `bronze-check` and `spark-shell` now use `spark-tools` too.
+- `compose/streaming.yml`: restructured around YAML anchors (`x-spark-build`, `x-spark-env`, `x-spark-job`). Each job sets `SPARK_UI_PORT`.
+- `compose/cdc.yml`: `kafka-connect` has `depends_on: postgres: {restart: true}`. `Makefile`: `make connector-restart`.
+- 11 new Spark tests (16 in total): typed parsing, latest-by-LSN versus arrival order, insert, newer update, ignored older and replayed events, many changes in one batch, a delete setting only the flag, an update plus a delete in one batch, insert/update/delete in one batch, a delete for an unseen key, and idempotent full replay.
+
+**How to run**
+```bash
+docker compose --profile cdc --profile streaming up -d
+make logs S=spark-silver-facts
+make scenario NAME=order_lifecycle_test && make scenario NAME=delete_test
+make spark-sql Q="SELECT order_id, status, is_deleted FROM silver.orders ORDER BY order_id DESC LIMIT 5"
+make stop-sim && make reconcile        # RECONCILED: silver matches postgres
+```
+
+**Bugs found while verifying (fixed)**
+- **An update and a delete in the same batch lost the update.**
+  - **What happened:** order 3384 was inserted in one Silver batch, then cancelled and hard-deleted inside the next. Latest-per-key kept only the delete, and the delete only set the flag, so Silver showed `placed` instead of `cancelled`.
+  - **Fix:** business values now come from the newest non-delete event in the batch, and regression tests were added.
+  - **Repair:** Silver was rebuilt from Bronze with `make silver-facts-rebuild`, which is exactly what Bronze exists for. Order 3384 now shows `cancelled` with `is_deleted = true`.
+- **The Debezium task stayed FAILED after Postgres was recreated.**
+  - **Cause:** changing `.env` made Compose recreate Postgres (it uses `env_file`). The task timed out reconnecting, and Kafka Connect never retries a failed task.
+  - **Fix:** `kafka-connect` now restarts with Postgres (`restart: true`). Verified: a `docker compose restart postgres` brings the task back to RUNNING on its own.
+- **`make spark-sql` mangled `$` in queries** (make expanded `$.status`), so it now passes `$(value Q)`.
+
+**Verified**
+- **Scenarios:** Silver shows order 3383 as `delivered` and order 3384 as `cancelled` with `is_deleted = true`. Its order item 14178 is also `is_deleted = true`.
+- **Reconcile after 3 minutes of live simulation:** exact match (orders 3,824, order_items 16,101, inventory 600; 0 missing, extra or differing).
+- **SIGKILL of `spark-silver-facts` during a live run, then restart:** reconcile matches again exactly (orders 4,207, order_items 17,768, inventory 600).
+- **Tests:** `make test` gives 31 host tests and 16 Spark tests, all passing.
+- **Memory:** spark-silver-facts about 1.2 GB, spark-bronze about 1.6 GB (2 GB limit each).
+
+**Known issues**
+- Silver lags Postgres by up to two trigger intervals (Bronze plus Silver, about 1 minute), which is within the "about a minute" target. `make reconcile` retries to absorb that.
+- Editing `.env` recreates the containers that use `env_file` (Postgres, seed, simulator). Connect now follows Postgres automatically.
 
 ---
 

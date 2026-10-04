@@ -1,6 +1,7 @@
 # Spark streaming jobs (profile: streaming), one job per container, Spark in local mode.
 # Compose restarts a crashed job; its checkpoint on MinIO makes it resume exactly where it
-# stopped. spark-test (profile: test) runs the Spark unit tests in the same image.
+# stopped. spark-tools (profile: tools) runs one-off lake tools; spark-test (profile: test)
+# runs the Spark unit tests in the same image.
 
 x-logging: &logging
   driver: json-file
@@ -8,25 +9,43 @@ x-logging: &logging
     max-size: ${LOG_MAX_SIZE:-10m}
     max-file: ${LOG_MAX_FILE:-3}
 
+x-spark-build: &spark-build
+  context: ..
+  dockerfile: streaming/Dockerfile
+  args:
+    PYTHON_IMAGE: ${PYTHON_IMAGE:?set PYTHON_IMAGE in .env}
+    UV_IMAGE: ${UV_IMAGE:?set UV_IMAGE in .env}
+
+x-spark-env: &spark-env
+  AWS_ACCESS_KEY_ID: ${LAKE_ACCESS_KEY:?set LAKE_ACCESS_KEY in .env}
+  AWS_SECRET_ACCESS_KEY: ${LAKE_SECRET_KEY:?set LAKE_SECRET_KEY in .env}
+  SPARK_DRIVER_MEMORY: ${SPARK_DRIVER_MEMORY:-1g}
+  SPARK_MASTER: ${SPARK_MASTER:-local[2]}
+  # glibc gives every JVM thread its own malloc arena; capping them stops native memory
+  # fragmentation from pushing the container towards its limit.
+  MALLOC_ARENA_MAX: 2
+
+# Shared by the long-running streaming jobs.
+x-spark-job: &spark-job
+  image: fmcg/spark:local
+  build: *spark-build
+  profiles: [streaming]
+  networks: [fmcg-net]
+  restart: unless-stopped
+  stop_grace_period: 30s
+  deploy:
+    resources:
+      limits:
+        memory: ${SPARK_MEM_LIMIT:-2g}
+  logging: *logging
+
 services:
   spark-bronze:
-    image: fmcg/spark:local
-    build:
-      context: ..
-      dockerfile: streaming/Dockerfile
-      args:
-        PYTHON_IMAGE: ${PYTHON_IMAGE:?set PYTHON_IMAGE in .env}
-        UV_IMAGE: ${UV_IMAGE:?set UV_IMAGE in .env}
-    profiles: [streaming]
+    <<: *spark-job
     command: ["python", "-m", "streaming.bronze.ingest_cdc"]
     environment:
-      AWS_ACCESS_KEY_ID: ${LAKE_ACCESS_KEY:?set LAKE_ACCESS_KEY in .env}
-      AWS_SECRET_ACCESS_KEY: ${LAKE_SECRET_KEY:?set LAKE_SECRET_KEY in .env}
-      SPARK_DRIVER_MEMORY: ${SPARK_DRIVER_MEMORY:-1g}
-      SPARK_MASTER: ${SPARK_MASTER:-local[2]}
-      # glibc gives every JVM thread its own malloc arena; capping them stops native memory
-      # fragmentation from pushing the container towards its limit.
-      MALLOC_ARENA_MAX: 2
+      <<: *spark-env
+      SPARK_UI_PORT: 4040
       BRONZE_TRIGGER_SECONDS: ${BRONZE_TRIGGER_SECONDS:-30}
       BRONZE_MAX_OFFSETS_PER_TRIGGER: ${BRONZE_MAX_OFFSETS_PER_TRIGGER:-50000}
     ports:
@@ -38,15 +57,50 @@ services:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
-    networks: [fmcg-net]
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:4040/api/v1/applications > /dev/null"]
       interval: 15s
       timeout: 5s
       retries: 8
       start_period: 90s
-    restart: unless-stopped
-    stop_grace_period: 30s
+
+  spark-silver-facts:
+    <<: *spark-job
+    command: ["python", "-m", "streaming.silver.upsert_facts"]
+    environment:
+      <<: *spark-env
+      SPARK_UI_PORT: 4041
+      SILVER_TRIGGER_SECONDS: ${SILVER_TRIGGER_SECONDS:-30}
+    ports:
+      - "4041:4041"   # Spark UI
+    depends_on:
+      hive-metastore:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      # Silver reads Bronze's Delta tables (it waits for them to exist on a fresh start).
+      spark-bronze:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:4041/api/v1/applications > /dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 90s
+
+  # One-off lake tools: make bronze-check | spark-sql | spark-shell | reconcile.
+  # Postgres access (reconcile only) uses the read-only Debezium user.
+  spark-tools:
+    image: fmcg/spark:local
+    build: *spark-build
+    profiles: [tools]
+    environment:
+      <<: *spark-env
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+      PG_READ_USER: ${DEBEZIUM_DB_USER:?set DEBEZIUM_DB_USER in .env}
+      PG_READ_PASSWORD: ${DEBEZIUM_DB_PASSWORD:?set DEBEZIUM_DB_PASSWORD in .env}
+    networks: [fmcg-net]
+    restart: "no"
     deploy:
       resources:
         limits:
@@ -56,8 +110,7 @@ services:
   spark-test:
     image: fmcg/spark:test
     build:
-      context: ..
-      dockerfile: streaming/Dockerfile
+      <<: *spark-build
       args:
         PYTHON_IMAGE: ${PYTHON_IMAGE:?set PYTHON_IMAGE in .env}
         UV_IMAGE: ${UV_IMAGE:?set UV_IMAGE in .env}

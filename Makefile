@@ -18,8 +18,8 @@ define not_yet
 endef
 
 .PHONY: help env up demo down nuke ps logs build seed simulate stop-sim scenario \
-        kafka-topics kafka-smoke register-connector connector-status cdc-counts cdc-tail spark-smoke \
-        bronze-check spark-shell test-host test-streaming \
+        kafka-topics kafka-smoke register-connector connector-status connector-restart cdc-counts cdc-tail spark-smoke \
+        bronze-check spark-shell spark-sql silver-facts-rebuild test-host test-streaming \
         psql dbt-build reconcile test lint
 
 help: ## Show this help
@@ -85,11 +85,18 @@ kafka-smoke: ## Broker smoke test: create, produce, consume and delete a test to
 spark-smoke: env ## Lake smoke test: write a Delta table to MinIO, register it in HMS, read it back
 	$(COMPOSE) --profile lake --profile streaming run --rm spark-bronze python -m streaming.smoke_test
 
+TOOLS := $(COMPOSE) --profile tools run --rm spark-tools
+
 bronze-check: ## Bronze rows per table/op, quarantine count, duplicate-offset check
-	$(COMPOSE) --profile streaming run --rm --no-deps spark-bronze python -m streaming.tools.bronze_check
+	$(TOOLS) python -m streaming.tools.bronze_check
 
 spark-shell: ## Interactive PySpark shell with the lake config (Delta, HMS, MinIO)
-	$(COMPOSE) --profile streaming run --rm --no-deps spark-bronze pyspark
+	$(TOOLS) pyspark
+
+Q ?=
+spark-sql: ## Run SQL against the lake: make spark-sql Q="SELECT * FROM silver.orders LIMIT 5"
+	@test -n "$(value Q)" || { echo 'usage: make spark-sql Q="<sql>"' >&2; exit 1; }
+	$(TOOLS) python -m streaming.tools.spark_sql "$(value Q)"
 
 # --- CDC ----------------------------------------------------------------------
 
@@ -98,6 +105,9 @@ register-connector: env ## Create/update the Debezium connector (idempotent) and
 
 connector-status: ## Show the Debezium connector and task state
 	@curl -fsS http://localhost:8083/connectors/fmcg-postgres/status; echo
+
+connector-restart: ## Restart the connector's failed task (it resumes from the slot, nothing lost)
+	@curl -fsS -X POST "http://localhost:8083/connectors/fmcg-postgres/restart?includeTasks=true&onlyFailed=true" && echo "restart requested"
 
 cdc-counts: ## Kafka messages per CDC topic vs Postgres row counts
 	@bash infra/debezium/cdc-counts.sh
@@ -109,8 +119,13 @@ cdc-tail: ## Last N CDC messages for a table: make cdc-tail T=orders N=5
 
 # --- Lakehouse and gold -------------------------------------------------------
 
-reconcile: ## Compare Silver facts against Postgres (counts + checksums)
-	$(call not_yet,6)
+silver-facts-rebuild: ## Rebuild Silver facts from Bronze (drops tables + checkpoints, replays)
+	$(COMPOSE) --profile streaming stop spark-silver-facts
+	$(TOOLS) python -m streaming.tools.reset_tables silver orders order_items inventory
+	$(COMPOSE) --profile streaming up -d spark-silver-facts
+
+reconcile: ## Silver facts vs Postgres, row by row (stop the simulator first)
+	$(TOOLS) python -m streaming.tools.reconcile
 
 dbt-build: ## Run dbt build against Trino
 	$(call not_yet,8)

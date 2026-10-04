@@ -42,6 +42,10 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+        # A Debezium task whose Postgres connection drops during a restart ends up FAILED,
+        # and Kafka Connect never retries it. Restarting the worker with Postgres restarts
+        # the task; the replication slot means nothing is lost.
+        restart: true
     networks: [fmcg-net]
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8083/connectors > /dev/null"]

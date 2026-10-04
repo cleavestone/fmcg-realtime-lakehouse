@@ -82,7 +82,9 @@ The seed is loaded once into Postgres. Debezium's initial snapshot (`snapshot.mo
 
 ### Silver: typed and deduplicated
 - Reads **Bronze Delta as a stream**, not Kafka ([ADR-003](adr/ADR-003-medallion-silver-reads-bronze.md)).
-- **Facts:** per micro-batch, keep the latest event per primary key by LSN, then `MERGE` into the target, but only where the incoming LSN is newer than the stored one. Deletes set a soft-delete flag.
+- **Facts** (`orders`, `order_items`, `inventory`): one Spark app runs one streaming query per table. Each reads `bronze.<table>` as a Delta stream, casts the raw payload to typed columns (money as `DECIMAL(12,2)`, ISO strings as `TIMESTAMP`), collapses the batch to one row per key, and `MERGE`s it with an **LSN guard** (`s.source_lsn > t.source_lsn`), so replays, re-sends and rebuilds never move a row backwards.
+  - **Collapsing a batch:** the LSN, time and delete flag come from the key's newest event. Business values come from the newest **non-delete** event when there is one, so an update followed by a delete in the same batch still lands the update.
+  - **Deletes are soft:** `is_deleted = true`. A delete-only batch sets just the flag and never overwrites business values.
 - **Dimensions (SCD2):** `row_hash` over tracked attributes suppresses no-op updates. Multiple changes to one key in a batch are ordered by LSN and each one becomes a version (`valid_to` comes from `lead()`). The open version is closed and the new versions are inserted in one `MERGE`.
 
 ### Gold: star schema
