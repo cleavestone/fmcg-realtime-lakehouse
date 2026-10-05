@@ -88,7 +88,30 @@ services:
       retries: 8
       start_period: 90s
 
-  # One-off lake tools: make bronze-check | spark-sql | spark-shell | reconcile.
+  spark-silver-dims:
+    <<: *spark-job
+    command: ["python", "-m", "streaming.silver.scd2_dimensions"]
+    environment:
+      <<: *spark-env
+      SPARK_UI_PORT: 4042
+      SILVER_TRIGGER_SECONDS: ${SILVER_TRIGGER_SECONDS:-30}
+    ports:
+      - "4042:4042"   # Spark UI
+    depends_on:
+      hive-metastore:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      spark-bronze:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:4042/api/v1/applications > /dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 90s
+
+  # One-off lake tools: make bronze-check | spark-sql | spark-shell | reconcile | scd2-check.
   # Postgres access (reconcile only) uses the read-only Debezium user.
   spark-tools:
     image: fmcg/spark:local

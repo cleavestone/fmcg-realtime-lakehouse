@@ -11,11 +11,65 @@ Phase-by-phase build log. Updated at the end of every phase.
 | 3. Debezium CDC | Done |
 | 4. Lake foundation | Done |
 | 5. Bronze ingestion | Done |
-| 6. Silver facts | Implemented, awaiting verification |
-| 7. Silver dimensions (SCD2) | — |
+| 6. Silver facts | Done |
+| 7. Silver dimensions (SCD2) | Implemented, awaiting verification |
 | 8. Trino and dbt Gold | — |
 | 9. Power BI report | — |
 | 10. Hardening and polish | — |
+
+---
+
+## Phase 7: Silver dimensions (SCD Type 2)
+
+**Built**
+- `common/schemas.py`: a `DimensionSpec` (natural key, surrogate key, columns, **tracked** attributes) for each dimension:
+  - `stores` → `dim_store`: name, channel, region_id, tier, credit_limit
+  - `products` → `dim_product`: sku, name, brand, category, pack_size, unit_price, is_active
+  - `sales_reps` → `dim_sales_rep`: name, region_id
+
+  It also adds `regions` to `FACTS` as plain current state.
+- `silver/scd2.py`: the pure versioning logic.
+  - **`build_changes()`:** per key, in LSN order after the stored current version, it ignores replayed events (LSN at or below the latest stored), drops no-ops (same `row_hash`), and turns every remaining event into a version whose window ends at the next boundary's commit time. A delete closes the current version with `is_deleted`. Snapshot first versions are valid from `1900-01-01`.
+  - **`merge_changes()`:** one MERGE keyed on the deterministic surrogate key `xxhash64(natural key, LSN)` closes and inserts in a single commit.
+- `silver/scd2_dimensions.py`: the `spark-silver-dims` app (UI on :4042), with one streaming query per dimension from `bronze.<table>` and checkpoints at `s3a://checkpoints/silver/dim_*`.
+  - **Columns:** surrogate key, business columns, `row_hash`, `valid_from`, `valid_to`, `is_current`, `is_deleted`, `source_lsn`, `source_ts_ms` and `silver_updated_at`.
+- `tools/scd2_check.py` and `make scd2-check`: at most one current version per key, contiguous and non-overlapping windows, `valid_from <= valid_to`, and the last version either current and open-ended or closed by a delete. Each dimension is read at **one pinned Delta version**.
+- `make silver-dims-rebuild`. `make silver-facts-rebuild` now also resets `regions`. `parse()` now also returns `op`.
+- `tests/test_scd2.py`: 13 tests covering the snapshot first version, a live insert, an attribute change, a no-op update, **3 changes in one batch (scrambled arrival order)**, no-ops inside a batch, snapshot plus changes in the first batch, a credit change, a delete, a change plus a delete in one batch, **replay of an old batch and a full replay**, a replayed delete, and independent keys. The Spark total is 29 tests.
+
+**How to run**
+```bash
+docker compose --profile cdc --profile streaming up -d      # adds spark-silver-dims
+make scenario NAME=scd2_price_test
+make scenario NAME=scd2_burst_test
+# ~1 minute later:
+make spark-sql Q="SELECT unit_price, valid_from, valid_to, is_current FROM silver.dim_product WHERE product_id = 1 ORDER BY valid_from"
+make spark-sql Q="SELECT tier, valid_from, valid_to, is_current FROM silver.dim_store WHERE store_id = 1 ORDER BY valid_from"
+make scd2-check
+```
+
+**Decisions (approved)**
+- **Snapshot versions are valid from `1900-01-01`.** Otherwise the 30 days of backfilled orders would match no dimension version in Gold's point-in-time join. The real snapshot time stays in `source_ts_ms`.
+- **`regions` is plain current state in the facts job,** because it never changes in this domain and Gold's `dim_store` needs region names.
+- **Window conventions:** half-open windows, an open end of `9999-12-31` (not NULL), and timestamps from `source_ts_ms` (commit time, ms precision). Ordering always uses `source_lsn`.
+
+**Verified**
+- **`scd2_price_test`:** product 1 has **4 versions** (50.00 → 52.50 → 50.93 → 55.00). The first starts at `1900-01-01`, each `valid_to` equals the next `valid_from`, the last is open until `9999-12-31`, and exactly one is current.
+- **`scd2_burst_test`:** three tier changes to store 1 within 0.4 s became **3 separate versions** (~200 ms windows). The log shows them in **one micro-batch** (`dim=dim_store batch=1 events=3 rows_merged=4`: 1 close plus 3 inserts).
+- **Live no-op update:** `UPDATE stores SET tier = tier WHERE store_id = 3` bumped `updated_at` but created **no** version.
+- **SIGKILL of `spark-silver-dims` during live simulation, then restart:** `make scd2-check` gives `SCD2 INVARIANTS HOLD` (dim_store 146 keys / 250 versions, dim_product 200 / 416, dim_sales_rep 10 / 58).
+- **Replay determinism:** I fingerprinted every surrogate key, row hash, window and LSN of all three dimensions, ran `make silver-dims-rebuild` (one batch replaying all of Bronze), and got **identical** fingerprints to the history built incrementally over many batches, including the kill.
+- **Reconcile** (now including `regions`): exact match (orders 4,685, order_items 19,802, inventory 600, regions 5).
+- **Tests:** `make test` gives 31 host tests and 29 Spark tests, all passing.
+- **Memory with all three Spark jobs:** about 0.5 / 0.9 / 1.2 GB (2 GB limit each).
+
+**Bug found while verifying (fixed)**
+- **`scd2-check` mixed snapshots:** while Silver was still committing, its separate queries read different Delta versions and printed 131 keys next to 146 current rows. Each dimension is now read at one pinned version (`versionAsOf`), and the data itself was always consistent.
+
+**Known issues**
+- The Spark test suite now takes about 6–7 minutes (real Delta MERGEs per test on 2 local cores).
+- The simulator never issues no-op updates or dimension deletes, so those paths are covered by unit tests and the manual no-op UPDATE above.
+- Validity timestamps have millisecond precision (Debezium `source_ts_ms`). Two changes to one key committed within the same millisecond would produce a zero-length window; the invariants still hold.
 
 ---
 

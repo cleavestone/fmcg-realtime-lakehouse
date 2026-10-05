@@ -9,13 +9,13 @@ Orders, price changes, store tier upgrades and stock movements happen in a Postg
 - CDC from a live OLTP system, including deletes, ordered by commit LSN rather than wall-clock time
 - A medallion architecture where Bronze is a replayable change log and Silver can be rebuilt without touching Kafka
 - Exactly-once, restart-safe streaming: checkpoints, idempotent Delta writes and an LSN-guarded MERGE, proven with hard-kill tests
-- SCD Type 2 maintained in streaming, correct even when one micro-batch holds several changes to the same key *(in progress)*
+- SCD Type 2 maintained in streaming, correct even when one micro-batch holds several changes to the same key, and deterministic under full replay
 - Point-in-time joins in Gold, so revenue reflects the price and store tier *at the time of sale* *(planned)*
 - Reproducible everything: pinned images, one uv lockfile, deterministic seed data, one-command startup
 
 ## Status
 
-The pipeline runs end to end from Postgres to **Silver**. Details for each phase are in [docs/PROGRESS.md](docs/PROGRESS.md).
+The pipeline runs end to end from Postgres to **Silver**, including SCD Type 2 dimensions. Details for each phase are in [docs/PROGRESS.md](docs/PROGRESS.md).
 
 | Phase | | What it delivers |
 |---|---|---|
@@ -27,8 +27,8 @@ The pipeline runs end to end from Postgres to **Silver**. Details for each phase
 | 4. Lake foundation | ✅ | MinIO, Hive Metastore and a Spark image with pinned, checksum-verified JARs |
 | 5. Bronze | ✅ | Raw, replayable change log in Delta, exactly-once |
 | 6. Silver facts | ✅ | Current-state `orders`, `order_items` and `inventory`, reconciled row by row against Postgres |
-| 7. Silver dimensions | ⏳ next | SCD Type 2 history for stores, products and sales reps |
-| 8. Gold | ⏳ | Trino plus a dbt star schema with point-in-time `fct_sales` |
+| 7. Silver dimensions | ✅ | SCD Type 2 history for stores, products and sales reps |
+| 8. Gold | ⏳ next | Trino plus a dbt star schema with point-in-time `fct_sales` |
 | 9. Power BI | ⏳ | Report on the Gold marts |
 | 10. Hardening | ⏳ | CI, one-command demo, runbook, polish |
 
@@ -63,8 +63,8 @@ flowchart TB
 
   classDef done fill:#d1fae5,stroke:#047857,stroke-width:2px,color:#064e3b
   classDef next fill:#f3f4f6,stroke:#6b7280,stroke-width:2px,stroke-dasharray:6 4,color:#374151
-  class SIM,PG,DBZ,K,BR,SF done
-  class SD,GD,PBI next
+  class SIM,PG,DBZ,K,BR,SF,SD done
+  class GD,PBI next
 ```
 
 <sub>Green = running today · dashed grey = coming next</sub>
@@ -105,6 +105,8 @@ The first start builds the Spark image, which downloads about 650 MB once. Bronz
 make logs S=spark-bronze                     # one "batch=N rows=..." line per micro-batch
 make scenario NAME=order_lifecycle_test      # create an order and walk it through every status
 make spark-sql Q="SELECT order_id, status, is_deleted FROM silver.orders ORDER BY order_id DESC LIMIT 5"
+make scenario NAME=scd2_price_test          # then: four versions of product 1
+make spark-sql Q="SELECT unit_price, valid_from, valid_to, is_current FROM silver.dim_product WHERE product_id = 1 ORDER BY valid_from"
 make stop-sim && make reconcile              # Silver vs Postgres, row by row: "RECONCILED"
 ```
 
@@ -116,7 +118,8 @@ make stop-sim && make reconcile              # Silver vs Postgres, row by row: "
 | `make bronze-check` | Bronze rows per table and op, plus the duplicate-offset check |
 | `make spark-sql Q="…"` · `make spark-shell` | Query the lake |
 | `make reconcile` | Silver facts vs Postgres, every row and column |
-| `make silver-facts-rebuild` | Rebuild Silver from Bronze |
+| `make scd2-check` | SCD2 invariants on every dimension |
+| `make silver-facts-rebuild` · `make silver-dims-rebuild` | Rebuild Silver from Bronze |
 | `make test` | Host tests (simulator) plus Spark tests in a container |
 | `make down` / `make nuke` | Stop (keep data) / stop and delete all volumes |
 
@@ -129,7 +132,7 @@ Bring up one domain at a time with `make up P=<profile>`:
 | `kafka` | kafka, kafka-ui |
 | `cdc` | kafka-connect, connector-register |
 | `lake` | minio, minio-init, hms-db, hive-metastore |
-| `streaming` | spark-bronze, spark-silver-facts *(spark-silver-dims in Phase 7)* |
+| `streaming` | spark-bronze, spark-silver-facts, spark-silver-dims |
 | `serving` | trino, dbt, dbt-scheduler *(Phase 8)* |
 
 Profiles pull in what they depend on; for example, `make up P=cdc` also starts Postgres and Kafka.
@@ -142,9 +145,10 @@ Profiles pull in what they depend on; for example, `make up P=cdc` also starts P
 | http://localhost:9001 | MinIO console: browse the Delta files (`MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD`) |
 | http://localhost:4040 | Spark UI: Bronze ingestion |
 | http://localhost:4041 | Spark UI: Silver facts |
+| http://localhost:4042 | Spark UI: Silver dimensions (SCD2) |
 | http://localhost:8083/connectors | Kafka Connect REST API |
 | localhost:5432 | Postgres (`make psql`) |
-| *4042 · 8081* | *Spark UI for Silver dimensions · Trino (coming in Phases 7–8)* |
+| *8081* | *Trino (coming in Phase 8)* |
 
 ## Verified so far
 
@@ -152,7 +156,8 @@ Profiles pull in what they depend on; for example, `make up P=cdc` also starts P
 - **CDC completeness:** after the snapshot, Kafka message counts equal Postgres row counts for all 7 tables. After a 20 s Debezium outage, every order's latest state in Kafka still matched Postgres.
 - **Bronze exactly-once:** after a SIGKILL mid-batch, Bronze rows equal Kafka messages for every table, with zero duplicate offsets.
 - **Silver correctness:** after live simulation and after a SIGKILL of the Silver job, `make reconcile` matches Postgres exactly, row by row and column by column.
-- **Tests:** 47 automated tests (31 simulator, 16 Spark) covering business rules, Bronze parsing and quarantine, and Silver MERGE semantics (out-of-order events, replays, deletes, several changes in one batch).
+- **SCD2:** `scd2_price_test` gives 4 contiguous versions of product 1, and `scd2_burst_test` gives 3 tier versions from one micro-batch. A live no-op UPDATE creates no version. After a SIGKILL of the dimensions job, every invariant still holds, and a full rebuild from Bronze reproduces the incrementally built history exactly (fingerprint of every surrogate key, hash and window).
+- **Tests:** 60 automated tests (31 simulator, 29 Spark) covering business rules, Bronze parsing and quarantine, Silver MERGE semantics and SCD2 versioning (new key, change, no-op, several changes per batch, delete, replay).
 
 ## Repository layout
 

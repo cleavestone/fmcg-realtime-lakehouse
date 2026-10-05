@@ -34,10 +34,14 @@ def _typed(column: str, sql_type: str) -> Column:
     return raw.cast(sql_type).alias(column)
 
 
-def parse(bronze_df: DataFrame, spec: TableSpec) -> DataFrame:
-    """Bronze rows (raw payload + CDC metadata) -> typed business columns + metadata."""
+def parse(bronze_df: DataFrame, spec) -> DataFrame:
+    """Bronze rows (raw payload + CDC metadata) -> typed business columns + metadata.
+
+    `spec` is a TableSpec or DimensionSpec (anything with `.columns`).
+    """
     return bronze_df.select(
         *[_typed(c, t) for c, t in spec.columns],
+        "op",
         "source_lsn",
         "source_ts_ms",
         "is_deleted",

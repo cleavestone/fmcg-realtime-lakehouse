@@ -19,7 +19,8 @@ endef
 
 .PHONY: help env up demo down nuke ps logs build seed simulate stop-sim scenario \
         kafka-topics kafka-smoke register-connector connector-status connector-restart cdc-counts cdc-tail spark-smoke \
-        bronze-check spark-shell spark-sql silver-facts-rebuild test-host test-streaming \
+        bronze-check spark-shell spark-sql silver-facts-rebuild silver-dims-rebuild scd2-check \
+        test-host test-streaming \
         psql dbt-build reconcile test lint
 
 help: ## Show this help
@@ -121,8 +122,16 @@ cdc-tail: ## Last N CDC messages for a table: make cdc-tail T=orders N=5
 
 silver-facts-rebuild: ## Rebuild Silver facts from Bronze (drops tables + checkpoints, replays)
 	$(COMPOSE) --profile streaming stop spark-silver-facts
-	$(TOOLS) python -m streaming.tools.reset_tables silver orders order_items inventory
+	$(TOOLS) python -m streaming.tools.reset_tables silver orders order_items inventory regions
 	$(COMPOSE) --profile streaming up -d spark-silver-facts
+
+silver-dims-rebuild: ## Rebuild SCD2 dimensions from Bronze (drops tables + checkpoints, replays)
+	$(COMPOSE) --profile streaming stop spark-silver-dims
+	$(TOOLS) python -m streaming.tools.reset_tables silver dim_store dim_product dim_sales_rep
+	$(COMPOSE) --profile streaming up -d spark-silver-dims
+
+scd2-check: ## SCD2 invariants on every dimension (one current, contiguous, no overlaps)
+	$(TOOLS) python -m streaming.tools.scd2_check
 
 reconcile: ## Silver facts vs Postgres, row by row (stop the simulator first)
 	$(TOOLS) python -m streaming.tools.reconcile

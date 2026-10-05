@@ -14,7 +14,7 @@ ORDERS = FACTS["orders"]
 ITEMS = FACTS["order_items"]
 INVENTORY = FACTS["inventory"]
 BRONZE_SCHEMA = (
-    "payload string, source_lsn bigint, source_ts_ms bigint, is_deleted boolean, "
+    "payload string, op string, source_lsn bigint, source_ts_ms bigint, is_deleted boolean, "
     "kafka_offset bigint"
 )
 
@@ -28,7 +28,15 @@ def order(order_id, status, lsn, offset=None, deleted=False, store_id=3):
         "status": status,
         "updated_at": "2026-10-03T14:01:56.352792Z",
     }
-    return (json.dumps(payload), lsn, lsn // 1000, deleted, offset if offset is not None else lsn)
+    op = "d" if deleted else "u"
+    return (
+        json.dumps(payload),
+        op,
+        lsn,
+        lsn // 1000,
+        deleted,
+        offset if offset is not None else lsn,
+    )
 
 
 def bronze(spark, *rows):
@@ -65,7 +73,7 @@ def test_parse_casts_money_and_timestamps(spark):
         "discount_pct": "2.50",
         "updated_at": "2026-10-03T14:03:34.370819Z",
     }
-    row = parse(bronze(spark, (json.dumps(payload), 1, 1, False, 0)), ITEMS).first()
+    row = parse(bronze(spark, (json.dumps(payload), "r", 1, 1, False, 0)), ITEMS).first()
     assert row["unit_price"] == Decimal("3192.00")
     assert row["discount_pct"] == Decimal("2.50")
     assert row["updated_at"] == datetime(2026, 10, 3, 14, 3, 34, 370819)
@@ -79,7 +87,7 @@ def test_parse_composite_key_table(spark):
         "qty_on_hand": 42,
         "updated_at": "2026-10-03T14:03:34Z",
     }
-    row = parse(bronze(spark, (json.dumps(payload), 1, 1, False, 0)), INVENTORY).first()
+    row = parse(bronze(spark, (json.dumps(payload), "r", 1, 1, False, 0)), INVENTORY).first()
     assert (row["product_id"], row["warehouse"], row["qty_on_hand"]) == (7, "nairobi_dc", 42)
 
 

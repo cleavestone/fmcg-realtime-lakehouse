@@ -12,6 +12,13 @@ Maintain SCD2 dimensions in a Spark streaming job (`spark-silver-dims`) driven b
 - Per batch: close the current open version, then insert all new versions, in one Delta `MERGE`.
 - Deletes close the current version and mark it `is_deleted`.
 
+### Implementation details (Phase 7)
+- **Tracked attributes:** a new version is created only when the SHA-256 `row_hash` over the tracked attributes changes. `updated_at` is excluded, because the trigger bumps it on every UPDATE, including no-ops.
+- **Window convention:** windows are half-open, `[valid_from, valid_to)`. Each `valid_to` equals the next version's `valid_from`, and an open version has `valid_to = 9999-12-31` (not NULL, so Gold's point-in-time join is a plain range predicate).
+- **First version:** the first version of an entity that came from the Debezium snapshot (`op = 'r'`) is valid from `1900-01-01`. History before CDC started is unknown, and without this the 30 days of backfilled orders would match no dimension version in Gold. Live inserts (`op = 'c'`) use their real commit time.
+- **Deterministic surrogate keys:** `xxhash64(natural_key, source_lsn)`. Together with ignoring events at or below a key's latest stored LSN, this makes replays and rebuilds produce exactly the same rows.
+- **One MERGE per batch:** each batch is applied as a single MERGE keyed on the surrogate key: close the existing current versions and insert the new ones.
+
 ## Consequences
 - Every committed change is captured, including bursts that land within a single micro-batch.
 - Validity windows reflect real commit time, which makes point-in-time joins in Gold accurate.

@@ -81,6 +81,21 @@ Nothing to do: Compose restarts it and each table's query resumes from `s3a://ch
 ### Rebuild Silver facts from Bronze
 After a bug fix in Silver logic, or to recover from bad Silver data: `make silver-facts-rebuild`. It stops the job, drops `silver.orders`, `silver.order_items` and `silver.inventory`, deletes their data and checkpoints on MinIO, and restarts the job, which replays the whole Bronze history (`batch=0` holds everything). Kafka isn't involved.
 
+## Silver dimensions (SCD2)
+
+| Check | Command |
+|---|---|
+| Job running, per-dimension batches | `make logs S=spark-silver-dims` (`dim=dim_store batch=N events=… rows_merged=… open_versions=…`) |
+| Spark UI | http://localhost:4042 |
+| Invariants (one current per key, contiguous, no overlaps) | `make scd2-check` (must print `SCD2 INVARIANTS HOLD`) |
+| History of one entity | `make spark-sql Q="SELECT * FROM silver.dim_product WHERE product_id = 1 ORDER BY valid_from"` |
+
+### Dimensions job crashed or was killed
+Nothing to do: it resumes from `s3a://checkpoints/silver/dim_*`. Replayed events are ignored, because their LSN is at or below the key's latest version and surrogate keys are deterministic. Verified with a SIGKILL during a live run, followed by `make scd2-check`.
+
+### Rebuild dimensions from Bronze
+`make silver-dims-rebuild` drops the three `dim_*` tables with their data and checkpoints and replays Bronze. The result is identical to the incrementally built history: verified by fingerprinting every surrogate key, hash and window before and after a rebuild.
+
 ## Procedures (to be written)
 
-- Rebuild Silver dimensions (Phase 7)
+- Gold rebuilds (Phase 8)

@@ -85,7 +85,12 @@ The seed is loaded once into Postgres. Debezium's initial snapshot (`snapshot.mo
 - **Facts** (`orders`, `order_items`, `inventory`): one Spark app runs one streaming query per table. Each reads `bronze.<table>` as a Delta stream, casts the raw payload to typed columns (money as `DECIMAL(12,2)`, ISO strings as `TIMESTAMP`), collapses the batch to one row per key, and `MERGE`s it with an **LSN guard** (`s.source_lsn > t.source_lsn`), so replays, re-sends and rebuilds never move a row backwards.
   - **Collapsing a batch:** the LSN, time and delete flag come from the key's newest event. Business values come from the newest **non-delete** event when there is one, so an update followed by a delete in the same batch still lands the update.
   - **Deletes are soft:** `is_deleted = true`. A delete-only batch sets just the flag and never overwrites business values.
-- **Dimensions (SCD2):** `row_hash` over tracked attributes suppresses no-op updates. Multiple changes to one key in a batch are ordered by LSN and each one becomes a version (`valid_to` comes from `lead()`). The open version is closed and the new versions are inserted in one `MERGE`.
+- **Dimensions (SCD2)** (`dim_store`, `dim_product`, `dim_sales_rep`): a separate Spark app (`spark-silver-dims`) with one streaming query per dimension. Per batch and per key, events are laid out in LSN order after the stored current version.
+  - **Which events count:** events at or below the key's latest LSN are ignored, and events whose `row_hash` (over the tracked attributes) equals the previous state are no-ops.
+  - **Versions:** every remaining event becomes a version whose window runs to the next one's commit time. A delete closes the current version and marks it `is_deleted`.
+  - **Atomic and deterministic:** one `MERGE` keyed on a deterministic surrogate key (`xxhash64(natural key, LSN)`) closes and inserts in a single commit.
+  - **First version:** snapshot versions are valid from `1900-01-01` (ADR-004).
+- **Regions:** kept as plain current state alongside the facts, because they never change in this domain.
 
 ### Gold: star schema
 - `fct_sales` at order-line grain, point-in-time joined to `dim_store`, `dim_product`, `dim_sales_rep` and `dim_date`.
